@@ -52,7 +52,6 @@ class ExitNode:
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
-        self._server_lock = asyncio.Lock()
 
     async def connect_server(self) -> None:
         reader, writer = await asyncio.open_connection(
@@ -67,23 +66,20 @@ class ExitNode:
     ) -> None:
         addr = writer.get_extra_info("peername")
         LOGGER.info("Middle connected %s", addr)
-        try:
-            while True:
-                frame = await Frame.read_from(reader)
-                self.path_writers[frame.path_id] = writer
-                if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+        while True:
+            frame = await Frame.read_from(reader)
+            self.path_writers[frame.path_id] = writer
+            if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+                continue
+            if frame.flags & FLAG_FRAGMENT:
+                complete, payload = self.fragment_buffer.add(frame)
+                if not complete:
                     continue
-                if frame.flags & FLAG_FRAGMENT:
-                    complete, payload = self.fragment_buffer.add(frame)
-                    if not complete:
-                        continue
-                    await self.forward_to_server(frame, payload)
-                    await self.send_ack(frame)
-                else:
-                    await self.forward_to_server(frame, frame.payload)
-                    await self.send_ack(frame)
-        except asyncio.IncompleteReadError:
-            LOGGER.info("Middle disconnected %s", addr)
+                await self.forward_to_server(frame, payload)
+                await self.send_ack(frame)
+            else:
+                await self.forward_to_server(frame, frame.payload)
+                await self.send_ack(frame)
 
     async def send_ack(self, frame: Frame) -> None:
         writer = self.path_writers.get(frame.path_id)
@@ -105,13 +101,12 @@ class ExitNode:
         await writer.drain()
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
-        async with self._server_lock:
-            if self.server_writer is None:
-                await self.connect_server()
-            assert self.server_writer and self.server_reader
-            self.server_writer.write(payload)
-            await self.server_writer.drain()
-            response = await self.server_reader.readexactly(len(payload))
+        if self.server_writer is None:
+            await self.connect_server()
+        assert self.server_writer and self.server_reader
+        self.server_writer.write(payload)
+        await self.server_writer.drain()
+        response = await self.server_reader.readexactly(len(payload))
         await self.send_downlink(frame, response)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:

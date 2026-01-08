@@ -59,8 +59,6 @@ class EntryNode:
         )
         self.timeout_events = 0
         self._window_task: asyncio.Task | None = None
-        self._next_down_seq = 0
-        self._pending_down: Dict[int, bytes] = {}
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         conns = []
@@ -116,8 +114,6 @@ class EntryNode:
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id)
             self._window_task = asyncio.create_task(self.start_window_loop())
-        self._next_down_seq = 0
-        self._pending_down = {}
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(path_conns, writer, fragment_buffer)
@@ -200,22 +196,11 @@ class EntryNode:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                await self.enqueue_downlink(frame.seq, payload, client_writer)
+                client_writer.write(payload)
+                await client_writer.drain()
             else:
-                await self.enqueue_downlink(frame.seq, frame.payload, client_writer)
-
-    async def enqueue_downlink(
-        self,
-        seq: int,
-        payload: bytes,
-        client_writer: asyncio.StreamWriter,
-    ) -> None:
-        self._pending_down[seq] = payload
-        while self._next_down_seq in self._pending_down:
-            data = self._pending_down.pop(self._next_down_seq)
-            client_writer.write(data)
-            await client_writer.drain()
-            self._next_down_seq += 1
+                client_writer.write(frame.payload)
+                await client_writer.drain()
 
 
 async def main() -> None:

@@ -29,24 +29,20 @@ async def bridge(
     dest_writer: asyncio.StreamWriter,
     config: PathConfig,
 ) -> None:
-    try:
-        while True:
-            data = await reader.read(4096)
-            if not data:
-                break
-            if random.random() < config.loss_rate:
-                continue
-            delay = config.base_delay_ms + random.randint(0, config.jitter_ms)
-            await asyncio.sleep(delay / 1000)
-            dest_writer.write(data)
-            await dest_writer.drain()
-    except ConnectionResetError:
-        LOGGER.warning("Connection reset during bridge")
-    finally:
-        writer.close()
-        dest_writer.close()
-        await writer.wait_closed()
-        await dest_writer.wait_closed()
+    while True:
+        data = await reader.read(4096)
+        if not data:
+            break
+        if random.random() < config.loss_rate:
+            continue
+        delay = config.base_delay_ms + random.randint(0, config.jitter_ms)
+        await asyncio.sleep(delay / 1000)
+        dest_writer.write(data)
+        await dest_writer.drain()
+    writer.close()
+    dest_writer.close()
+    await writer.wait_closed()
+    await dest_writer.wait_closed()
 
 
 async def handle_entry(
