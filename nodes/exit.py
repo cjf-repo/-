@@ -52,7 +52,6 @@ class ExitNode:
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
-        self._server_lock = asyncio.Lock()
 
     async def connect_server(self) -> None:
         reader, writer = await asyncio.open_connection(
@@ -102,13 +101,12 @@ class ExitNode:
         await writer.drain()
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
-        async with self._server_lock:
-            if self.server_writer is None:
-                await self.connect_server()
-            assert self.server_writer and self.server_reader
-            self.server_writer.write(payload)
-            await self.server_writer.drain()
-            response = await self.server_reader.readexactly(len(payload))
+        if self.server_writer is None:
+            await self.connect_server()
+        assert self.server_writer and self.server_reader
+        self.server_writer.write(payload)
+        await self.server_writer.drain()
+        response = await self.server_reader.readexactly(len(payload))
         await self.send_downlink(frame, response)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
