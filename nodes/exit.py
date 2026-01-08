@@ -52,7 +52,6 @@ class ExitNode:
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
-        self._server_lock = asyncio.Lock()
 
     async def connect_server(self) -> None:
         reader, writer = await asyncio.open_connection(
@@ -60,30 +59,27 @@ class ExitNode:
         )
         self.server_reader = reader
         self.server_writer = writer
-        LOGGER.info("已连接到目标服务 %s:%s", self.config.server_host, self.config.server_port)
+        LOGGER.info("Connected to server %s:%s", self.config.server_host, self.config.server_port)
 
     async def handle_middle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         addr = writer.get_extra_info("peername")
-        LOGGER.info("中继节点已连接 %s", addr)
-        try:
-            while True:
-                frame = await Frame.read_from(reader)
-                self.path_writers[frame.path_id] = writer
-                if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+        LOGGER.info("Middle connected %s", addr)
+        while True:
+            frame = await Frame.read_from(reader)
+            self.path_writers[frame.path_id] = writer
+            if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+                continue
+            if frame.flags & FLAG_FRAGMENT:
+                complete, payload = self.fragment_buffer.add(frame)
+                if not complete:
                     continue
-                if frame.flags & FLAG_FRAGMENT:
-                    complete, payload = self.fragment_buffer.add(frame)
-                    if not complete:
-                        continue
-                    await self.forward_to_server(frame, payload)
-                    await self.send_ack(frame)
-                else:
-                    await self.forward_to_server(frame, frame.payload)
-                    await self.send_ack(frame)
-        except asyncio.IncompleteReadError:
-            LOGGER.info("中继节点已断开 %s", addr)
+                await self.forward_to_server(frame, payload)
+                await self.send_ack(frame)
+            else:
+                await self.forward_to_server(frame, frame.payload)
+                await self.send_ack(frame)
 
     async def send_ack(self, frame: Frame) -> None:
         writer = self.path_writers.get(frame.path_id)
@@ -105,13 +101,12 @@ class ExitNode:
         await writer.drain()
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
-        async with self._server_lock:
-            if self.server_writer is None:
-                await self.connect_server()
-            assert self.server_writer and self.server_reader
-            self.server_writer.write(payload)
-            await self.server_writer.drain()
-            response = await self.server_reader.readexactly(len(payload))
+        if self.server_writer is None:
+            await self.connect_server()
+        assert self.server_writer and self.server_reader
+        self.server_writer.write(payload)
+        await self.server_writer.drain()
+        response = await self.server_reader.readexactly(len(payload))
         await self.send_downlink(frame, response)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
@@ -146,7 +141,7 @@ async def main() -> None:
     args = parse_args()
     node = ExitNode(DEFAULT_CONFIG)
     server = await asyncio.start_server(node.handle_middle, DEFAULT_CONFIG.exit_host, args.listen)
-    LOGGER.info("出口节点监听 %s:%s", DEFAULT_CONFIG.exit_host, args.listen)
+    LOGGER.info("Exit listening on %s:%s", DEFAULT_CONFIG.exit_host, args.listen)
     async with server:
         await server.serve_forever()
 

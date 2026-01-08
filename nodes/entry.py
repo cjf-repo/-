@@ -59,15 +59,13 @@ class EntryNode:
         )
         self.timeout_events = 0
         self._window_task: asyncio.Task | None = None
-        self._next_down_seq = 0
-        self._pending_down: Dict[int, bytes] = {}
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         conns = []
         for port in self.config.middle_ports:
             reader, writer = await asyncio.open_connection(self.config.middle_host, port)
             conns.append((reader, writer))
-            LOGGER.info("已连接到中继 %s", port)
+            LOGGER.info("Connected to middle %s", port)
         return conns
 
     async def start_window_loop(self) -> None:
@@ -87,7 +85,7 @@ class EntryNode:
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id, output.proto_id)
             LOGGER.info(
-                "时间窗 %s 更新：权重=%s 填充=%.3f 抖动=%sms 协议=%s",
+                "Window %s update: weights=%s padding=%.3f jitter=%sms proto=%s",
                 self.window_id,
                 output.weights,
                 output.behavior.padding_alpha,
@@ -109,15 +107,13 @@ class EntryNode:
         writer: asyncio.StreamWriter,
     ) -> None:
         addr = writer.get_extra_info("peername")
-        LOGGER.info("客户端已连接 %s", addr)
+        LOGGER.info("Client connected %s", addr)
         path_conns = await self.connect_paths()
         await self.send_handshake(path_conns)
         if self._window_task is None:
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id)
             self._window_task = asyncio.create_task(self.start_window_loop())
-        self._next_down_seq = 0
-        self._pending_down = {}
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(path_conns, writer, fragment_buffer)
@@ -131,7 +127,7 @@ class EntryNode:
                 for chunk in chunks:
                     await self.send_chunk(chunk, path_conns)
         except asyncio.IncompleteReadError:
-            LOGGER.info("客户端已断开 %s", addr)
+            LOGGER.info("Client disconnected %s", addr)
         finally:
             downlink_task.cancel()
             writer.close()
@@ -200,29 +196,18 @@ class EntryNode:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                await self.enqueue_downlink(frame.seq, payload, client_writer)
+                client_writer.write(payload)
+                await client_writer.drain()
             else:
-                await self.enqueue_downlink(frame.seq, frame.payload, client_writer)
-
-    async def enqueue_downlink(
-        self,
-        seq: int,
-        payload: bytes,
-        client_writer: asyncio.StreamWriter,
-    ) -> None:
-        self._pending_down[seq] = payload
-        while self._next_down_seq in self._pending_down:
-            data = self._pending_down.pop(self._next_down_seq)
-            client_writer.write(data)
-            await client_writer.drain()
-            self._next_down_seq += 1
+                client_writer.write(frame.payload)
+                await client_writer.drain()
 
 
 async def main() -> None:
     args = parse_args()
     node = EntryNode(DEFAULT_CONFIG)
     server = await asyncio.start_server(node.handle_client, DEFAULT_CONFIG.entry_host, args.listen)
-    LOGGER.info("入口节点监听 %s:%s", DEFAULT_CONFIG.entry_host, args.listen)
+    LOGGER.info("Entry listening on %s:%s", DEFAULT_CONFIG.entry_host, args.listen)
     async with server:
         await server.serve_forever()
 
