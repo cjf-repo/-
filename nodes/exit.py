@@ -147,7 +147,10 @@ class ExitNode:
         remaining = data
         fragments: List[tuple[int, bytes]] = []
         while remaining:
-            path_id = self.scheduler.choose_path()
+            available_paths = list(self.path_writers.keys())
+            if not available_paths:
+                return
+            path_id = self.scheduler.choose_path_from(available_paths)
             target_len = self.behavior.sample_target_len(path_id)
             piece = remaining[:target_len]
             remaining = remaining[target_len:]

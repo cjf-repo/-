@@ -37,6 +37,17 @@ class MultiPathScheduler:
         self._batch_remaining -= 1
         return self._current_path
 
+    def choose_path_from(self, allowed_paths: List[int]) -> int:
+        if not allowed_paths:
+            raise ValueError("allowed_paths 不能为空")
+        if self._current_path not in allowed_paths or self._batch_remaining <= 0:
+            self._current_path = random.choices(
+                allowed_paths, weights=[self.weights[p] for p in allowed_paths]
+            )[0]
+            self._batch_remaining = self.batch_size
+        self._batch_remaining -= 1
+        return self._current_path
+
     def mark_sent(self, path_id: int, seq: int) -> None:
         self.stats[path_id].sent += 1
         self.stats[path_id].last_send_ts[seq] = time.time()
