@@ -26,12 +26,15 @@ from scheduler import MultiPathScheduler
 from strategy import StrategyEngine
 from run_context import get_run_context
 
+# 出口节点：解码上行分片、转发到目标服务，并回传响应。
+
 
 LOGGER = setup_logger("exit")
 ACK_STRUCT = struct.Struct("!Q")
 
 
 def parse_args() -> argparse.Namespace:
+    # 命令行参数解析
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen", type=int, default=DEFAULT_CONFIG.exit_port)
     return parser.parse_args()
@@ -39,9 +42,12 @@ def parse_args() -> argparse.Namespace:
 
 class ExitNode:
     def __init__(self, config=DEFAULT_CONFIG) -> None:
+        # 保存配置与运行上下文
         self.config = config
         self.run_context = get_run_context(config)
+        # 协议混淆器
         self.proto = ProtoObfuscator()
+        # 基线行为参数
         base_params = BehaviorParams(
             size_bins=config.size_bins,
             q_dist=[1 / len(config.size_bins) for _ in config.size_bins],
@@ -55,19 +61,23 @@ class ExitNode:
             enable_pacing=True,
             enable_jitter=True,
         )
+        # baseline 模式仅使用单路径
         self.active_middle_ports = (
             [config.middle_ports[0]]
             if config.mode.startswith("baseline")
             else list(config.middle_ports)
         )
+        # 行为整形器
         self.behavior = BehaviorShaper(
             base_params,
             path_ids=list(range(len(self.active_middle_ports))),
         )
+        # 多路径调度器
         self.scheduler = MultiPathScheduler(
             path_ids=list(range(len(self.active_middle_ports))),
             batch_size=config.batch_size,
         )
+        # 策略引擎
         self.strategy = StrategyEngine(
             size_bins=config.size_bins,
             base_padding=config.padding_alpha,
@@ -81,6 +91,7 @@ class ExitNode:
             adaptive_behavior=config.adaptive_behavior,
             adaptive_proto=config.adaptive_proto,
         )
+        # 分片缓冲与路径 writer
         self.fragment_buffer = FragmentBuffer()
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
         self.server_reader: asyncio.StreamReader | None = None
@@ -88,6 +99,7 @@ class ExitNode:
         self._server_lock = asyncio.Lock()
         self._window_task: asyncio.Task | None = None
         self.window_id = 0
+        # 协议族/变体映射
         self.family_by_path: Dict[int, int] = {
             path_id: 1 for path_id in range(len(self.active_middle_ports))
         }
@@ -96,6 +108,7 @@ class ExitNode:
         }
 
     async def connect_server(self) -> None:
+        # 连接目标服务
         reader, writer = await asyncio.open_connection(
             self.config.server_host, self.config.server_port
         )
@@ -106,6 +119,7 @@ class ExitNode:
     async def handle_middle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        # 处理中继连接
         addr = writer.get_extra_info("peername")
         LOGGER.info("中继节点已连接 %s", addr)
         if self._window_task is None:
@@ -117,6 +131,7 @@ class ExitNode:
                 if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_ACK):
                     continue
                 frame = self.proto.decode_payload(frame)
+                # 处理分片或完整 payload
                 if frame.flags & FLAG_FRAGMENT:
                     complete, payload = self.fragment_buffer.add(frame)
                     if not complete:
@@ -130,6 +145,7 @@ class ExitNode:
             LOGGER.info("中继节点已断开 %s", addr)
 
     async def send_ack(self, frame: Frame) -> None:
+        # 回发 ACK
         writer = self.path_writers.get(frame.path_id)
         if not writer:
             return
@@ -149,6 +165,7 @@ class ExitNode:
         await writer.drain()
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
+        # 与上游服务串行交互，避免 readexactly 冲突
         async with self._server_lock:
             if self.server_writer is None:
                 await self.connect_server()
@@ -160,6 +177,7 @@ class ExitNode:
         await self.send_downlink(frame, response)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
+        # 下行分片并发送
         remaining = data
         fragments: List[tuple[int, bytes]] = []
         while remaining:
@@ -210,11 +228,13 @@ class ExitNode:
                     await writer.drain()
 
     async def start_window_loop(self) -> None:
+        # 周期性窗口循环：策略更新与日志输出
         while True:
             await asyncio.sleep(self.config.window_size_sec)
             self.window_id += 1
             metrics = self.scheduler.snapshot()
             output = self.strategy.evaluate(metrics, 0, self.window_id)
+            # 更新调度与行为参数
             self.scheduler.update_weights(output.weights)
             self.family_by_path = output.family_by_path
             self.variant_by_path = output.variant_by_path
@@ -253,6 +273,7 @@ class ExitNode:
 
 
 async def main() -> None:
+    # 启动出口节点服务
     args = parse_args()
     node = ExitNode(DEFAULT_CONFIG)
     server = await asyncio.start_server(node.handle_middle, DEFAULT_CONFIG.exit_host, args.listen)

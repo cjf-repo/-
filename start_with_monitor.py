@@ -7,14 +7,19 @@ import uuid
 
 from config import DEFAULT_CONFIG
 
+# 启动脚本：带监控进程的单机实验启动。
+
 
 async def run() -> None:
+    # 管理子进程
     processes = []
     python = sys.executable
+    # 为监控场景生成 run_id 与输出目录
     run_id = f"{uuid.uuid4().hex[:8]}"
     out_dir = f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
 
+    # 启动各节点
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.server", env=base_env))
     await asyncio.sleep(0.2)
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.exit", env=base_env))

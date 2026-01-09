@@ -6,17 +6,22 @@ import subprocess
 import sys
 import uuid
 
+# 批量实验脚本：按参数组合运行并生成指标汇总。
+
 
 def run_one(env: dict[str, str], sessions: int) -> None:
+    # 为单次运行生成 run_id 与输出目录
     run_id = env.get("RUN_ID") or uuid.uuid4().hex[:8]
     env["RUN_ID"] = run_id
     env["OUT_DIR"] = f"out/{run_id}"
     env["SESSION_COUNT"] = str(sessions)
+    # 启动全链路与指标汇总
     subprocess.run([sys.executable, "start_all.py"], check=True, env=env)
     subprocess.run([sys.executable, "metrics.py", "--run-dir", env["OUT_DIR"]], check=True, env=env)
 
 
 def main() -> None:
+    # 构造 sweep 参数空间
     base_env = os.environ.copy()
     path_counts = [2, 3, 4]
     obfuscation_levels = [0, 1, 2, 3]
@@ -31,6 +36,7 @@ def main() -> None:
     ]
     sessions_per_run = 3
 
+    # 正常模式的多维组合 sweep
     for path_count, level, alpha, switch_period, adaptive_mode in itertools.product(
         path_counts,
         obfuscation_levels,

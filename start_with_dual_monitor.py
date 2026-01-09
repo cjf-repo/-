@@ -7,10 +7,14 @@ import uuid
 
 from config import DEFAULT_CONFIG
 
+# 启动脚本：双监控采集（多条路径对比）。
+
 
 async def run() -> None:
+    # 管理子进程
     processes = []
     python = sys.executable
+    # 生成 run_id 与输出目录
     run_id = f"{uuid.uuid4().hex[:8]}"
     out_dir = f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}

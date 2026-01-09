@@ -7,12 +7,15 @@ from dataclasses import dataclass
 from frames import HEADER_STRUCT
 from logger import setup_logger
 
+# 在线监控工具：解析流量中的帧头并输出摘要。
+
 
 LOGGER = setup_logger("monitor_live")
 
 
 @dataclass
 class FrameSummary:
+    # 帧头字段汇总（便于快速查看）
     session_id: int
     seq: int
     direction: int
@@ -29,10 +32,12 @@ class FrameSummary:
 
 class FrameTap:
     def __init__(self, label: str) -> None:
+        # 用于标识不同方向/链路的 tap
         self.label = label
         self._buffer = bytearray()
 
     def feed(self, data: bytes) -> None:
+        # 追加数据并尝试解析完整帧
         self._buffer.extend(data)
         while True:
             summary = self._try_parse_one()
@@ -56,6 +61,7 @@ class FrameTap:
             )
 
     def _try_parse_one(self) -> FrameSummary | None:
+        # 尝试解析一帧，不足则返回 None
         if len(self._buffer) < HEADER_STRUCT.size:
             return None
         header = self._buffer[: HEADER_STRUCT.size]
@@ -99,6 +105,7 @@ async def relay(
     writer: asyncio.StreamWriter,
     tap: FrameTap,
 ) -> None:
+    # 中继并实时解析帧摘要
     try:
         while True:
             data = await reader.read(4096)
@@ -108,6 +115,7 @@ async def relay(
             writer.write(data)
             await writer.drain()
     finally:
+        # 关闭连接
         writer.close()
         await writer.wait_closed()
 
@@ -118,6 +126,7 @@ async def handle_client(
     target_host: str,
     target_port: int,
 ) -> None:
+    # 接入客户端后转发到目标并双向监控
     upstream_reader, upstream_writer = await asyncio.open_connection(target_host, target_port)
     await asyncio.gather(
         relay(reader, upstream_writer, FrameTap("上行")),
@@ -126,6 +135,7 @@ async def handle_client(
 
 
 def parse_args() -> argparse.Namespace:
+    # 命令行参数解析
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen-host", default="127.0.0.1")
     parser.add_argument("--listen-port", type=int, required=True)
@@ -135,6 +145,7 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main() -> None:
+    # 启动监听并转发
     args = parse_args()
     server = await asyncio.start_server(
         lambda r, w: handle_client(r, w, args.target_host, args.target_port),

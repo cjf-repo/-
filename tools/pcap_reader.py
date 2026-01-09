@@ -8,12 +8,15 @@ from dataclasses import dataclass
 from frames import HEADER_STRUCT
 from logger import setup_logger
 
+# PCAP 解析工具：从网络抓包中提取帧摘要。
+
 
 LOGGER = setup_logger("pcap_reader")
 
 
 @dataclass
 class FrameSummary:
+    # 帧头字段汇总
     session_id: int
     seq: int
     direction: int
@@ -30,10 +33,12 @@ class FrameSummary:
 
 class FrameTap:
     def __init__(self, label: str) -> None:
+        # 用于标识不同方向/链路
         self.label = label
         self._buffer = bytearray()
 
     def feed(self, data: bytes) -> None:
+        # 追加数据并尝试解析
         self._buffer.extend(data)
         while True:
             summary = self._try_parse_one()
@@ -57,6 +62,7 @@ class FrameTap:
             )
 
     def _try_parse_one(self) -> FrameSummary | None:
+        # 尝试解析一帧，不足则返回 None
         if len(self._buffer) < HEADER_STRUCT.size:
             return None
         header = self._buffer[: HEADER_STRUCT.size]
@@ -96,6 +102,7 @@ class FrameTap:
 
 
 def parse_args() -> argparse.Namespace:
+    # 命令行参数解析
     parser = argparse.ArgumentParser()
     parser.add_argument("--pcap", required=True, help="pcap 文件路径（libpcap 格式）")
     parser.add_argument("--port", type=int, action="append", help="只解析匹配的端口，可多次传入")
@@ -103,6 +110,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_pcap(path: str, ports: set[int]) -> None:
+    # 读取 pcap 文件并解析 TCP payload 中的帧
     with open(path, "rb") as handle:
         header = handle.read(24)
         if len(header) < 24:
@@ -138,6 +146,7 @@ def parse_pcap(path: str, ports: set[int]) -> None:
 
 
 def extract_tcp_payload(packet: bytes, linktype: int) -> tuple[str, int, str, int, bytes] | None:
+    # 解析链路层/网络层/传输层并提取 TCP payload
     if linktype == 1:
         if len(packet) < 14:
             return None
@@ -180,6 +189,7 @@ def extract_tcp_payload(packet: bytes, linktype: int) -> tuple[str, int, str, in
 
 
 def main() -> None:
+    # 命令行入口：解析 pcap 并输出摘要
     args = parse_args()
     ports = set(args.port or [])
     parse_pcap(args.pcap, ports)

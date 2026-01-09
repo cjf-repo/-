@@ -31,8 +31,10 @@ from strategy import StrategyEngine
 LOGGER = setup_logger("entry")
 ACK_STRUCT = struct.Struct("!Q")
 
+# 入口节点：接收客户端流量，分片并在多路径上发送。
 
 def parse_args() -> argparse.Namespace:
+    # 命令行参数解析
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen", type=int, default=DEFAULT_CONFIG.entry_port)
     parser.add_argument("--middle-ports", default="", help="覆盖中继端口列表，例如 9103,9102")
@@ -41,12 +43,16 @@ def parse_args() -> argparse.Namespace:
 
 class EntryNode:
     def __init__(self, config=DEFAULT_CONFIG) -> None:
+        # 保存配置与上下文
         self.config = config
         self.run_context = get_run_context(config)
+        # 会话/窗口状态
         self.session_id = random.randint(1, 2**32 - 1)
         self.window_id = 0
         self.seq_counter = 0
+        # 协议混淆器
         self.proto = ProtoObfuscator()
+        # 基线行为参数
         base_params = BehaviorParams(
             size_bins=config.size_bins,
             q_dist=[1 / len(config.size_bins) for _ in config.size_bins],
@@ -60,15 +66,18 @@ class EntryNode:
             enable_pacing=True,
             enable_jitter=True,
         )
+        # baseline 模式仅使用单路径
         self.active_middle_ports = (
             [config.middle_ports[0]]
             if config.mode.startswith("baseline")
             else list(config.middle_ports)
         )
+        # 行为整形器
         self.behavior = BehaviorShaper(
             base_params,
             path_ids=list(range(len(self.active_middle_ports))),
         )
+        # 策略引擎
         self.strategy = StrategyEngine(
             size_bins=config.size_bins,
             base_padding=config.padding_alpha,
@@ -82,14 +91,17 @@ class EntryNode:
             adaptive_behavior=config.adaptive_behavior,
             adaptive_proto=config.adaptive_proto,
         )
+        # 多路径调度器
         self.scheduler = MultiPathScheduler(
             path_ids=list(range(len(self.active_middle_ports))),
             batch_size=config.batch_size,
         )
+        # 超时事件计数
         self.timeout_events = 0
         self._window_task: asyncio.Task | None = None
         self._next_down_seq = 0
         self._pending_down: Dict[int, bytes] = {}
+        # 协议族/变体映射
         self.family_by_path: Dict[int, int] = {
             path_id: 1 for path_id in range(len(self.active_middle_ports))
         }
@@ -98,6 +110,7 @@ class EntryNode:
         }
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
+        # 连接所有中继路径
         conns = []
         for port in self.active_middle_ports:
             reader, writer = await asyncio.open_connection(self.config.middle_host, port)
@@ -106,6 +119,7 @@ class EntryNode:
         return conns
 
     async def start_window_loop(self) -> None:
+        # 周期性窗口循环：评估策略并写日志
         while True:
             await asyncio.sleep(self.config.window_size_sec)
             now = time.time()
@@ -118,6 +132,7 @@ class EntryNode:
             self.window_id += 1
             metrics = self.scheduler.snapshot()
             output = self.strategy.evaluate(metrics, self.timeout_events, self.window_id)
+            # 更新调度权重与行为参数
             self.scheduler.update_weights(output.weights)
             self.family_by_path = output.family_by_path
             self.variant_by_path = output.variant_by_path
@@ -128,9 +143,11 @@ class EntryNode:
                     drift = 0.0
                 if output.adaptive_flags["adaptive_behavior"]:
                     self.behavior.update_q_dist(path_id, drift, seed=self.window_id * 100 + path_id)
+            # 新窗口开始
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id, output.family_by_path, output.variant_by_path)
             for path_id, stats in metrics.items():
+                # 记录窗口日志（用于离线分析）
                 behavior = output.behavior_by_path[path_id]
                 pad_bytes = self.behavior.path_states[path_id].padding_bytes
                 real_bytes = self.behavior.path_states[path_id].real_bytes
@@ -156,6 +173,7 @@ class EntryNode:
             self.timeout_events = 0
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
+        # 发送握手帧，建立协议上下文
         for path_id, (_, writer) in enumerate(conns):
             family_id = self.family_by_path.get(path_id, 1)
             variant_id = self.variant_by_path.get(path_id, 0)
@@ -171,6 +189,7 @@ class EntryNode:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        # 处理客户端连接
         addr = writer.get_extra_info("peername")
         LOGGER.info("客户端已连接 %s", addr)
         path_conns = await self.connect_paths()
@@ -202,6 +221,7 @@ class EntryNode:
                 await path_writer.wait_closed()
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
+        # 将上行 payload 分片并发送
         seq = self.seq_counter
         self.seq_counter += 1
         remaining = data
@@ -217,6 +237,7 @@ class EntryNode:
             self.behavior.note_real_bytes(path_id, len(piece))
         total = len(fragments)
         for frag_id, (path_id, payload) in enumerate(fragments):
+            # 为每个分片构建帧并发送
             family_id = self.family_by_path.get(path_id, 1)
             variant_id = self.variant_by_path.get(path_id, 0)
             frame = Frame(
@@ -253,6 +274,7 @@ class EntryNode:
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
     ) -> None:
+        # 并发读取各路径下行数据
         readers = [reader for reader, _ in path_conns]
         tasks = [asyncio.create_task(self.read_path(reader, client_writer, fragment_buffer)) for reader in readers]
         await asyncio.gather(*tasks)
@@ -263,6 +285,7 @@ class EntryNode:
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
     ) -> None:
+        # 单路径读取并处理下行帧
         while True:
             frame = await Frame.read_from(reader)
             if frame.flags & FLAG_ACK:
@@ -274,6 +297,7 @@ class EntryNode:
             if frame.direction != DIR_DOWN:
                 continue
             if frame.flags & FLAG_FRAGMENT:
+                # 分片重组
                 if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
                 complete, payload = fragment_buffer.add(frame)
@@ -281,6 +305,7 @@ class EntryNode:
                     continue
                 await self.enqueue_downlink(frame.seq, payload, client_writer)
             else:
+                # 完整 payload 直接入队
                 if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
                 await self.enqueue_downlink(frame.seq, frame.payload, client_writer)
@@ -301,6 +326,7 @@ class EntryNode:
 
 
 async def main() -> None:
+    # 启动入口节点服务
     args = parse_args()
     config = DEFAULT_CONFIG
     if args.middle_ports:

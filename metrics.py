@@ -7,8 +7,11 @@ import math
 from pathlib import Path
 from statistics import mean, variance
 
+# 指标汇总：计算特征统计与结果指标，输出 JSON 文件。
+
 
 def quantiles(values: list[float], qs: list[float]) -> dict[str, float]:
+    # 计算分位数（简单索引法）
     if not values:
         return {f"p{int(q*100)}": 0.0 for q in qs}
     sorted_vals = sorted(values)
@@ -20,6 +23,7 @@ def quantiles(values: list[float], qs: list[float]) -> dict[str, float]:
 
 
 def read_trace(path: Path) -> tuple[list[float], list[int]]:
+    # 读取 trace CSV，返回时间与长度序列
     times: list[float] = []
     lengths: list[int] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -31,6 +35,7 @@ def read_trace(path: Path) -> tuple[list[float], list[int]]:
 
 
 def burst_stats(times: list[float], threshold: float = 0.05) -> dict[str, float]:
+    # 统计 burst（相邻间隔小于阈值的连续段）
     if len(times) < 2:
         return {"burst_count": 0, "max_burst": 0, **quantiles([], [0.5, 0.9, 0.95])}
     bursts = []
@@ -50,6 +55,7 @@ def burst_stats(times: list[float], threshold: float = 0.05) -> dict[str, float]
 
 
 def iat_stats(times: list[float]) -> dict[str, float]:
+    # 统计 IAT（相邻时间差）
     if len(times) < 2:
         return {"iat_mean": 0.0, "iat_var": 0.0, **quantiles([], [0.5, 0.9, 0.95])}
     iats = [times[i] - times[i - 1] for i in range(1, len(times))]
@@ -61,6 +67,7 @@ def iat_stats(times: list[float]) -> dict[str, float]:
 
 
 def length_stats(lengths: list[int]) -> dict[str, float]:
+    # 统计包长分布
     if not lengths:
         return {"len_mean": 0.0, "len_var": 0.0, **quantiles([], [0.5, 0.9, 0.95])}
     return {
@@ -71,6 +78,7 @@ def length_stats(lengths: list[int]) -> dict[str, float]:
 
 
 def pearson(xs: list[float], ys: list[float]) -> float:
+    # 计算皮尔逊相关系数
     if not xs or not ys:
         return 0.0
     n = min(len(xs), len(ys))
@@ -84,6 +92,7 @@ def pearson(xs: list[float], ys: list[float]) -> float:
 
 
 def summarize_trace(path: Path) -> dict[str, float]:
+    # 汇总单条 trace 的统计特征
     times, lengths = read_trace(path)
     return {
         **length_stats(lengths),
@@ -93,6 +102,7 @@ def summarize_trace(path: Path) -> dict[str, float]:
 
 
 def summarize_attacker(run_dir: Path) -> dict[str, dict[str, float]]:
+    # 汇总攻击者可见的 TM1/TM2 轨迹特征
     traces_dir = run_dir / "traces"
     result: dict[str, dict[str, float]] = {}
     for tm in ("TM1", "TM2"):
@@ -109,6 +119,7 @@ def summarize_attacker(run_dir: Path) -> dict[str, dict[str, float]]:
 
 
 def path_correlation(run_dir: Path) -> dict[str, float]:
+    # 计算多路径之间的长度相关性
     traces_dir = run_dir / "traces"
     per_path = {}
     for path in traces_dir.glob("trace_session_*_path_*_TM1.csv"):
@@ -129,6 +140,7 @@ def path_correlation(run_dir: Path) -> dict[str, float]:
 
 
 def results_summary(run_dir: Path) -> dict[str, float]:
+    # 统计成功率、延迟分位数、放大率与 padding 比例
     latency_path = run_dir / "latency_logs.jsonl"
     success = 0
     total = 0
@@ -165,6 +177,7 @@ def results_summary(run_dir: Path) -> dict[str, float]:
 
 
 def main() -> None:
+    # 命令行入口：写入 feature_summary 与 results_summary
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True)
     args = parser.parse_args()

@@ -7,39 +7,57 @@ from typing import Dict, List, Sequence, Tuple
 
 from frames import DIR_DOWN, DIR_UP, Frame, FLAG_HANDSHAKE
 
+# 协议族配置：定义握手模板、变体参数与混淆方式。
+
 
 @dataclass
 class HandshakeSpec:
+    # 握手方向
     direction: int
+    # 握手帧大小
     size: int
+    # 帧间延迟（毫秒）
     delay_ms: int
 
 
 class ObfuscationMode(Enum):
+    # 不混淆
     NONE = "none"
+    # XOR 混淆
     XOR = "xor"
+    # XOR 后反转
     XOR_REVERSE = "xor_reverse"
 
 
 @dataclass
 class ProtoVariant:
+    # 变体 ID
     variant_id: int
+    # 可选帧大小
     frame_sizes: Sequence[int]
+    # 额外头长度范围
     extra_header_range: tuple[int, int]
+    # 混淆模式
     obfuscation_mode: ObfuscationMode
+    # 是否在额外头中添加 padding
     padding_header: bool
 
 
 @dataclass
 class ProtoFamily:
+    # 协议族 ID
     family_id: int
+    # 握手模板序列
     handshake: Sequence[HandshakeSpec]
+    # 变体集合
     variants: Sequence[ProtoVariant]
 
     def pick_frame_size(self, variant: ProtoVariant) -> int:
+        # 从变体帧大小中随机选择
         return random.choice(variant.frame_sizes)
 
     def pick_extra_header(self, variant: ProtoVariant) -> bytes:
+        # 生成额外头（含变体 ID 与随机 padding）
         low, high = variant.extra_header_range
         length = random.randint(low, high)
         padding = random.randbytes(length) if length else b""
@@ -49,6 +67,7 @@ class ProtoFamily:
         return bytes([variant.variant_id]) + padding
 
     def encode_payload(self, payload: bytes, variant: ProtoVariant) -> bytes:
+        # 根据混淆模式对 payload 编码
         if not payload:
             return payload
         if variant.obfuscation_mode is ObfuscationMode.NONE:
@@ -60,6 +79,7 @@ class ProtoFamily:
         return bytes([key]) + obfuscated
 
     def decode_payload(self, payload: bytes, variant: ProtoVariant) -> bytes:
+        # 还原混淆后的 payload
         if not payload:
             return payload
         if variant.obfuscation_mode is ObfuscationMode.NONE:
@@ -72,6 +92,7 @@ class ProtoFamily:
 
 
 def default_profiles() -> List[ProtoFamily]:
+    # 默认协议族配置列表
     return [
         ProtoFamily(
             family_id=1,

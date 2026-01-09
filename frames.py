@@ -5,6 +5,8 @@ import struct
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+# 帧结构定义与分片缓冲。
+
 FLAG_PADDING = 1 << 0
 FLAG_HANDSHAKE = 1 << 1
 FLAG_FRAGMENT = 1 << 2
@@ -14,24 +16,37 @@ FLAG_ACK = 1 << 4
 DIR_UP = 0
 DIR_DOWN = 1
 
-HEADER_STRUCT = struct.Struct("!I Q b B I H B H H I")  # 固定头部，便于帧解析
+# 固定头部格式：便于帧解析
+HEADER_STRUCT = struct.Struct("!I Q b B I H B H H I")
 
 
 @dataclass
 class Frame:
+    # 会话 ID
     session_id: int
+    # 序列号
     seq: int
+    # 方向（上行/下行）
     direction: int
+    # 路径 ID
     path_id: int
+    # 窗口 ID
     window_id: int
+    # 协议族 ID
     proto_id: int
+    # 标志位
     flags: int
+    # 分片编号
     frag_id: int
+    # 分片总数
     frag_total: int
+    # 有效载荷
     payload: bytes
+    # 可扩展的额外头部
     extra_header: bytes = b""
 
     def encode(self) -> bytes:
+        # 序列化为字节流
         extra_len = len(self.extra_header)
         payload_len = len(self.payload)
         # 头部 + 可变额外头 + flags + payload
@@ -51,6 +66,7 @@ class Frame:
 
     @staticmethod
     async def read_from(reader: asyncio.StreamReader) -> Optional["Frame"]:
+        # 从流中读取并解析一帧
         header_data = await reader.readexactly(HEADER_STRUCT.size)
         (
             session_id,
@@ -89,6 +105,7 @@ class Frame:
 
 class FragmentBuffer:
     def __init__(self) -> None:
+        # 缓存未完成分片
         self._buffers: dict[int, dict[int, bytes]] = {}
         self._totals: dict[int, int] = {}
 

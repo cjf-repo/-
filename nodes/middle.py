@@ -11,11 +11,14 @@ from logger import setup_logger
 from run_context import get_run_context
 from frames import HEADER_STRUCT
 
+# 中继节点：模拟路径时延/丢包并生成 trace。
+
 
 LOGGER = setup_logger("middle")
 
 
 def parse_args() -> argparse.Namespace:
+    # 命令行参数解析
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen", type=int, required=True)
     parser.add_argument("--exit-host", default=DEFAULT_CONFIG.exit_host)
@@ -29,6 +32,7 @@ def parse_args() -> argparse.Namespace:
 
 class TraceWriter:
     def __init__(self, run_context, path_id: int) -> None:
+        # 按路径/会话维护 trace 文件句柄
         self.run_context = run_context
         self.path_id = path_id
         self.buffers: dict[int, bytearray] = {}
@@ -37,6 +41,7 @@ class TraceWriter:
         self.handles: dict[tuple[int, str], object] = {}
 
     def _writer_for(self, session_id: int, trace_type: str) -> csv.writer:
+        # 获取指定会话/类型的 trace writer
         key = (session_id, trace_type)
         if key in self.writers:
             return self.writers[key]
@@ -51,6 +56,7 @@ class TraceWriter:
         return writer
 
     def _attacker_writer(self, session_id: int, trace_type: str) -> csv.writer:
+        # 获取攻击者视角 trace writer
         key = (session_id, f"attacker_{trace_type}")
         if key in self.writers:
             return self.writers[key]
@@ -116,6 +122,7 @@ async def bridge(
     trace: TraceWriter | None,
     direction: str,
 ) -> None:
+    # 双向转发：模拟丢包/延迟并记录 trace
     try:
         while True:
             data = await reader.read(4096)
@@ -132,6 +139,7 @@ async def bridge(
     except ConnectionResetError:
         LOGGER.warning("转发链路发生连接重置")
     finally:
+        # 关闭双向连接
         writer.close()
         dest_writer.close()
         await writer.wait_closed()
@@ -146,6 +154,7 @@ async def handle_entry(
     exit_port: int,
     path_id: int,
 ) -> None:
+    # 处理入口连接并建立到出口的转发
     addr = writer.get_extra_info("peername")
     LOGGER.info("入口节点已连接 %s", addr)
     run_context = get_run_context(DEFAULT_CONFIG)
@@ -158,6 +167,7 @@ async def handle_entry(
 
 
 async def main() -> None:
+    # 启动中继节点服务
     args = parse_args()
     config = PathConfig(
         host="127.0.0.1",

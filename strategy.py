@@ -9,13 +9,21 @@ from behavior import BehaviorParams
 
 @dataclass
 class StrategyOutput:
+    # 路径权重（调度用）
     weights: Dict[int, float]
+    # 各路径行为参数
     behavior_by_path: Dict[int, BehaviorParams]
+    # 各路径协议族
     family_by_path: Dict[int, int]
+    # 各路径协议变体
     variant_by_path: Dict[int, int]
+    # 当前混淆等级
     obfuscation_level: int
+    # 触发事件（用于日志）
     trigger: str
+    # 动作类型（用于日志）
     action: str
+    # 自适应开关快照
     adaptive_flags: Dict[str, bool]
 
 
@@ -34,6 +42,7 @@ class StrategyEngine:
         adaptive_behavior: bool,
         adaptive_proto: bool,
     ) -> None:
+        # 保存基础策略参数
         self.size_bins = size_bins
         self.base_padding = base_padding
         self.base_jitter = base_jitter
@@ -41,10 +50,13 @@ class StrategyEngine:
         self.base_rate = base_rate
         self.obfuscation_level = obfuscation_level
         self.mode = mode
+        # 协议轮换周期（窗口数）
         self.proto_switch_period = proto_switch_period
+        # 自适应开关
         self.adaptive_paths = adaptive_paths
         self.adaptive_behavior = adaptive_behavior
         self.adaptive_proto = adaptive_proto
+        # 协议族/变体选择状态
         self._family_index = 0
         self._variant_seed = 0
 
@@ -60,14 +72,18 @@ class StrategyEngine:
         family_by_path: Dict[int, int] = {}
         variant_by_path: Dict[int, int] = {}
         for path_id, stats in metrics.items():
+            # 默认权重为 1.0
             weight = 1.0
+            # 若启用自适应路径，则遇到高 RTT/丢包降低权重
             if self.adaptive_paths and (stats["loss"] > 0.1 or stats["rtt_ms"] > 200):
                 weight *= 0.5
             weights[path_id] = weight
 
+        # 计算全路径平均指标用于全局调参
         mean_loss = sum(stats["loss"] for stats in metrics.values()) / max(len(metrics), 1)
         mean_rtt = sum(stats["rtt_ms"] for stats in metrics.values()) / max(len(metrics), 1)
 
+        # 初始化行为参数基线
         padding = self.base_padding
         jitter = self.base_jitter
         rate = self.base_rate
@@ -79,6 +95,7 @@ class StrategyEngine:
         enable_pacing = True
         enable_jitter = True
 
+        # 按混淆等级调整参数
         if level == 0:
             padding = 0.0
             jitter = 0
@@ -102,16 +119,20 @@ class StrategyEngine:
             burst = 8
             rate = int(self.base_rate * 0.8)
 
+        # 当整体质量变差时收敛 padding/jitter 与速率
         if mean_loss > 0.2 or mean_rtt > 250:
             padding = max(0.01, padding * 0.5)
             jitter = max(5, int(jitter * 0.5))
             rate = int(rate * 0.8)
 
+        # 基于 size_bins 生成当前窗口的采样分布
         size_bins = [int(b * random.uniform(0.9, 1.1)) for b in self.size_bins]
         q_dist = [1 / len(size_bins) for _ in size_bins]
 
+        # 触发/动作用于日志记录
         trigger = "none"
         if self.adaptive_proto:
+            # 超时或周期触发协议切换
             if timeout_events > 2:
                 trigger = "timeout"
             elif window_id % self.proto_switch_period == 0:
@@ -127,6 +148,7 @@ class StrategyEngine:
         if self.adaptive_behavior:
             action = "update_behavior"
 
+        # 为每条路径构造行为参数
         for path_id in metrics.keys():
             if self.mode == "baseline_delay":
                 # 仅保留 pacing/jitter，关闭整形/填充/协议变体
@@ -145,12 +167,14 @@ class StrategyEngine:
                 enable_pacing = False
                 enable_jitter = False
             else:
+                # normal 模式下根据自适应开关选择协议族/变体
                 if self.adaptive_proto:
                     family_id = self.family_ids[(self._family_index + path_id) % len(self.family_ids)]
                     variant_id = (self._variant_seed + path_id) % 2
                 else:
                     family_id = 1
                     variant_id = 0
+                # 关闭自适应行为时，禁用行为层能力
                 if not self.adaptive_behavior:
                     enable_shaping = False
                     enable_padding = False
@@ -158,6 +182,7 @@ class StrategyEngine:
                     enable_jitter = False
             family_by_path[path_id] = family_id
             variant_by_path[path_id] = variant_id
+            # 组装行为参数：当关闭整形时锁定分布
             behavior_by_path[path_id] = BehaviorParams(
                 size_bins=size_bins,
                 q_dist=q_dist,
@@ -173,6 +198,7 @@ class StrategyEngine:
                 fixed_q_dist=q_dist if not enable_shaping else None,
             )
 
+        # 返回策略输出（包含日志所需元信息）
         return StrategyOutput(
             weights=weights,
             behavior_by_path=behavior_by_path,
