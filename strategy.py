@@ -104,6 +104,7 @@ class StrategyEngine:
 
         for path_id in metrics.keys():
             if self.mode == "baseline_delay":
+                # 仅保留 pacing/jitter，关闭整形/填充/协议变体
                 family_id = 1
                 variant_id = 0
                 enable_shaping = False
@@ -111,6 +112,7 @@ class StrategyEngine:
                 enable_pacing = True
                 enable_jitter = True
             elif self.mode == "baseline_padding":
+                # 仅保留整形/填充，关闭 pacing/jitter/协议变体
                 family_id = 1
                 variant_id = 0
                 enable_shaping = True

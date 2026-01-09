@@ -69,6 +69,7 @@ class TraceWriter:
             handle.close()
 
     def feed(self, data: bytes, direction: str) -> None:
+        # 攻击者单点观测：仅从 Entry->Middle 方向采样，输出 TM1/TM2
         buffer = self.buffers.setdefault(self.path_id, bytearray())
         buffer.extend(data)
         while True:
@@ -96,6 +97,7 @@ class TraceWriter:
             t = now - start
             tm1 = self._writer_for(session_id, "TM1")
             tm2 = self._writer_for(session_id, "TM2")
+            # TM1: TCP/IP 可见长度；TM2: 隧道帧总长度（不含 payload 内容）
             tm1.writerow([f"{t:.6f}", direction, total_len])
             tm2.writerow([f"{t:.6f}", direction, total_len])
             if self.path_id == self.run_context.attacker_path_id:

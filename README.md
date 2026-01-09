@@ -100,6 +100,29 @@ python -m tools.pcap_reader --pcap path/to/file.pcap --port 9101 --port 9102
 通过比较 `path=0` 与 `path=1` 的 `proto/extra/flags/frag` 分布，可以观察两条路径在
 协议外观与行为特征上的差异。
 
+## 实验输出目录与复现信息
+
+每次运行会生成一个 `run_id`，并输出到：
+
+```
+out/<run_id>/
+```
+
+目录包含：
+
+- `config_dump.json`：本次运行配置快照
+- `meta.json`：run_id、seed、attacker_path_id、启动时间
+- `window_logs.jsonl`：窗口级结构化日志
+- `traces/`：攻击者视角 TM1/TM2 CSV
+
+### baseline 对照模式
+
+在 `config.py` 里通过 `mode` 选择运行模式：
+
+- `normal`：完整功能（多路径 + 行为伪装 + 属性伪装）
+- `baseline_delay`：只开启 pacing/jitter（禁用整形/填充/协议变体，路径数=1）
+- `baseline_padding`：只开启整形+填充（禁用 pacing/jitter/协议变体，路径数=1）
+
 ## 配置说明
 
 所有参数集中在 `config.py`：

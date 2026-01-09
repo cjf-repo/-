@@ -162,6 +162,7 @@ class ExitNode:
             available_paths = list(self.path_writers.keys())
             if not available_paths:
                 return
+            # 回程仅在可用路径内调度，避免分片丢失
             path_id = self.scheduler.choose_path_from(available_paths)
             target_len = self.behavior.sample_target_len(path_id)
             params = self.behavior.params_by_path[path_id]

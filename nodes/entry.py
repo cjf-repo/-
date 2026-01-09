@@ -197,6 +197,7 @@ class EntryNode:
         remaining = data
         fragments: List[tuple[int, bytes]] = []
         while remaining:
+            # 路径调度 + 按路径目标分布选择分片长度
             path_id = self.scheduler.choose_path()
             params = self.behavior.params_by_path[path_id]
             target_len = len(remaining) if not params.enable_shaping else self.behavior.sample_target_len(path_id)

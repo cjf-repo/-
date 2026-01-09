@@ -34,12 +34,14 @@ def get_run_context(config: Config = DEFAULT_CONFIG) -> RunContext:
     if _CONTEXT is not None:
         return _CONTEXT
 
+    # 运行级唯一标识，用于输出目录与实验复现
     run_id = os.environ.get("RUN_ID") or time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     out_dir = Path(os.environ.get("OUT_DIR") or Path("out") / run_id)
     traces_dir = out_dir / "traces"
     out_dir.mkdir(parents=True, exist_ok=True)
     traces_dir.mkdir(parents=True, exist_ok=True)
 
+    # 固定随机种子，保证策略漂移/分配可复现
     seed_env = os.environ.get("SEED")
     seed = int(seed_env) if seed_env is not None else (config.seed or random.randint(1, 10_000_000))
     random.seed(seed)
@@ -49,6 +51,7 @@ def get_run_context(config: Config = DEFAULT_CONFIG) -> RunContext:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         attacker_path_id = int(meta.get("attacker_path_id", 0))
     else:
+        # 选择攻击者可观测路径（固定/随机）
         attacker_env = os.environ.get("ATTACKER_PATH_ID")
         if attacker_env is not None:
             attacker_path_id = int(attacker_env)
