@@ -5,6 +5,7 @@ import asyncio
 import random
 import struct
 import time
+from dataclasses import replace
 from typing import Dict, List
 
 from behavior import BehaviorShaper, BehaviorParams
@@ -30,6 +31,7 @@ ACK_STRUCT = struct.Struct("!Q")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--listen", type=int, default=DEFAULT_CONFIG.entry_port)
+    parser.add_argument("--middle-ports", default="", help="覆盖中继端口列表，例如 9103,9102")
     return parser.parse_args()
 
 
@@ -228,9 +230,13 @@ class EntryNode:
 
 async def main() -> None:
     args = parse_args()
-    node = EntryNode(DEFAULT_CONFIG)
-    server = await asyncio.start_server(node.handle_client, DEFAULT_CONFIG.entry_host, args.listen)
-    LOGGER.info("入口节点监听 %s:%s", DEFAULT_CONFIG.entry_host, args.listen)
+    config = DEFAULT_CONFIG
+    if args.middle_ports:
+        ports = [int(port.strip()) for port in args.middle_ports.split(",") if port.strip()]
+        config = replace(DEFAULT_CONFIG, middle_ports=ports)
+    node = EntryNode(config)
+    server = await asyncio.start_server(node.handle_client, config.entry_host, args.listen)
+    LOGGER.info("入口节点监听 %s:%s", config.entry_host, args.listen)
     async with server:
         await server.serve_forever()
 
