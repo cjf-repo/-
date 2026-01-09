@@ -28,6 +28,7 @@ class MultiPathScheduler:
             self.weights[path_id] = max(weight, 0.1)
 
     def choose_path(self) -> int:
+        # 批量随机：同一批次走同一路径，降低乱序
         if self._batch_remaining <= 0:
             self._current_path = random.choices(
                 self.path_ids, weights=[self.weights[p] for p in self.path_ids]
@@ -45,6 +46,7 @@ class MultiPathScheduler:
         path_stats.acked += 1
         sent_ts = path_stats.last_send_ts.pop(seq, None)
         if sent_ts is not None:
+            # RTT 采用平滑估计
             rtt = (time.time() - sent_ts) * 1000
             path_stats.rtt_ms = (path_stats.rtt_ms * 0.7) + (rtt * 0.3)
 

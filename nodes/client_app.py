@@ -23,14 +23,14 @@ async def main() -> None:
     args = parse_args()
     reader, writer = await asyncio.open_connection(args.entry_host, args.entry_port)
     payload = os.urandom(args.size)
-    LOGGER.info("Sending %s bytes", len(payload))
+    LOGGER.info("发送 %s 字节", len(payload))
     writer.write(payload)
     await writer.drain()
     response = await reader.readexactly(len(payload))
     if response == payload:
-        LOGGER.info("Echo verified (%s bytes)", len(response))
+        LOGGER.info("回显校验通过（%s 字节）", len(response))
     else:
-        LOGGER.error("Echo mismatch")
+        LOGGER.error("回显校验失败")
     writer.close()
     await writer.wait_closed()
 

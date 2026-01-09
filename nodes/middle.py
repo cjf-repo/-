@@ -29,27 +29,31 @@ async def bridge(
     dest_writer: asyncio.StreamWriter,
     config: PathConfig,
 ) -> None:
-    while True:
-        data = await reader.read(4096)
-        if not data:
-            break
-        if random.random() < config.loss_rate:
-            continue
-        delay = config.base_delay_ms + random.randint(0, config.jitter_ms)
-        await asyncio.sleep(delay / 1000)
-        dest_writer.write(data)
-        await dest_writer.drain()
-    writer.close()
-    dest_writer.close()
-    await writer.wait_closed()
-    await dest_writer.wait_closed()
+    try:
+        while True:
+            data = await reader.read(4096)
+            if not data:
+                break
+            if random.random() < config.loss_rate:
+                continue
+            delay = config.base_delay_ms + random.randint(0, config.jitter_ms)
+            await asyncio.sleep(delay / 1000)
+            dest_writer.write(data)
+            await dest_writer.drain()
+    except ConnectionResetError:
+        LOGGER.warning("转发链路发生连接重置")
+    finally:
+        writer.close()
+        dest_writer.close()
+        await writer.wait_closed()
+        await dest_writer.wait_closed()
 
 
 async def handle_entry(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, config: PathConfig, exit_host: str, exit_port: int
 ) -> None:
     addr = writer.get_extra_info("peername")
-    LOGGER.info("Entry connected %s", addr)
+    LOGGER.info("入口节点已连接 %s", addr)
     exit_reader, exit_writer = await asyncio.open_connection(exit_host, exit_port)
     await asyncio.gather(
         bridge(reader, writer, exit_reader, exit_writer, config),
@@ -71,7 +75,7 @@ async def main() -> None:
         "127.0.0.1",
         args.listen,
     )
-    LOGGER.info("Middle listening on %s -> exit %s:%s", args.listen, args.exit_host, args.exit_port)
+    LOGGER.info("中继节点监听 %s -> 出口 %s:%s", args.listen, args.exit_host, args.exit_port)
     async with server:
         await server.serve_forever()
 

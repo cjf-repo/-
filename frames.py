@@ -14,7 +14,7 @@ FLAG_ACK = 1 << 4
 DIR_UP = 0
 DIR_DOWN = 1
 
-HEADER_STRUCT = struct.Struct("!I Q b B I H B H H I")
+HEADER_STRUCT = struct.Struct("!I Q b B I H B H H I")  # 固定头部，便于帧解析
 
 
 @dataclass
@@ -34,6 +34,7 @@ class Frame:
     def encode(self) -> bytes:
         extra_len = len(self.extra_header)
         payload_len = len(self.payload)
+        # 头部 + 可变额外头 + flags + payload
         header = HEADER_STRUCT.pack(
             self.session_id,
             self.seq,
@@ -92,6 +93,7 @@ class FragmentBuffer:
         self._totals: dict[int, int] = {}
 
     def add(self, frame: Frame) -> Tuple[bool, Optional[bytes]]:
+        # 按 seq 收集分片，收齐后拼接
         if frame.seq not in self._buffers:
             self._buffers[frame.seq] = {}
             self._totals[frame.seq] = frame.frag_total

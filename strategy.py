@@ -33,6 +33,7 @@ class StrategyEngine:
         metrics: Dict[int, Dict[str, float]],
         timeout_events: int,
     ) -> StrategyOutput:
+        # 简化的规则引擎：根据 RTT/丢包调整权重与行为参数
         weights: Dict[int, float] = {}
         for path_id, stats in metrics.items():
             weight = 1.0

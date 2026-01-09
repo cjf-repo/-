@@ -39,6 +39,7 @@ class BehaviorShaper:
         chunks: List[bytes] = []
         remaining = data
         while remaining:
+            # 将原始数据按分桶大小切分
             target = random.choice(self.params.size_bins)
             piece = remaining[:target]
             remaining = remaining[target:]
@@ -53,6 +54,7 @@ class BehaviorShaper:
         max_frames: int = 3,
     ) -> List[Frame]:
         frames: List[Frame] = []
+        # padding 预算用尽则停止
         if self.state.padding_bytes >= self.state.padding_budget:
             return frames
         remaining = self.state.padding_budget - self.state.padding_bytes

@@ -33,6 +33,7 @@ class ProtoObfuscator:
         self.state.proto_id = ids[(current_index + 1) % len(ids)]
 
     def apply(self, frame: Frame) -> Frame:
+        # 为当前窗口选择的模板写入 proto_id，并随机化额外头
         profile = self.pick_profile()
         frame.proto_id = profile.proto_id
         frame.extra_header = profile.pick_extra_header()
