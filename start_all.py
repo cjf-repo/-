@@ -28,9 +28,18 @@ async def run() -> None:
     await asyncio.sleep(0.2)
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.entry"))
     await asyncio.sleep(0.5)
-    processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.client_app"))
+    client_proc = await asyncio.create_subprocess_exec(
+        python,
+        "-m",
+        "nodes.client_app",
+        "--duration",
+        "20",
+        "--interval",
+        "0.5",
+    )
+    processes.append(client_proc)
 
-    await asyncio.sleep(2)
+    await client_proc.wait()
     for proc in processes:
         if proc.returncode is None:
             proc.terminate()
