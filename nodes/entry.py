@@ -243,6 +243,8 @@ class EntryNode:
                 seq = ACK_STRUCT.unpack(frame.payload)[0]
                 self.scheduler.mark_ack(frame.path_id, seq)
                 continue
+            if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+                continue
             if frame.direction != DIR_DOWN:
                 continue
             if frame.flags & FLAG_FRAGMENT:
