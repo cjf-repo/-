@@ -35,6 +35,8 @@ class Config:
     redundancy: int = 0
     base_rate_bytes_per_sec: int = 50000
     obfuscation_level: int = 2
+    mode: str = "normal"
+    seed: int | None = None
 
     ack_timeout_sec: float = 2.0
 

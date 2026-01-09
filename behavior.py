@@ -17,6 +17,10 @@ class BehaviorParams:
     rate_bytes_per_sec: int
     burst_size: int
     obfuscation_level: int
+    enable_shaping: bool
+    enable_padding: bool
+    enable_pacing: bool
+    enable_jitter: bool
 
 
 @dataclass
@@ -103,6 +107,8 @@ class BehaviorShaper:
 
     async def pace(self, path_id: int, size: int) -> None:
         state = self.path_states[path_id]
+        if not self.params_by_path[path_id].enable_pacing:
+            return
         current = state.last_ts or 0.0
         if current == 0.0:
             state.last_ts = asyncio.get_event_loop().time()
@@ -127,6 +133,8 @@ class BehaviorShaper:
     ) -> List[Frame]:
         frames: List[Frame] = []
         state = self.path_states[template_frame.path_id]
+        if not self.params_by_path[template_frame.path_id].enable_padding:
+            return frames
         # padding 预算用尽则停止
         if state.padding_bytes >= state.padding_budget:
             return frames

@@ -25,6 +25,7 @@ class StrategyEngine:
         family_ids: List[int],
         base_rate: int,
         obfuscation_level: int,
+        mode: str,
     ) -> None:
         self.size_bins = size_bins
         self.base_padding = base_padding
@@ -32,6 +33,7 @@ class StrategyEngine:
         self.family_ids = family_ids
         self.base_rate = base_rate
         self.obfuscation_level = obfuscation_level
+        self.mode = mode
         self._family_index = 0
         self._variant_seed = 0
 
@@ -60,6 +62,10 @@ class StrategyEngine:
         drift = 0.02
         burst = 6
         level = self.obfuscation_level
+        enable_shaping = True
+        enable_padding = True
+        enable_pacing = True
+        enable_jitter = True
 
         if level == 0:
             padding = 0.0
@@ -67,6 +73,10 @@ class StrategyEngine:
             drift = 0.0
             burst = 1
             rate = self.base_rate * 2
+            enable_padding = False
+            enable_shaping = False
+            enable_pacing = False
+            enable_jitter = False
         elif level == 1:
             drift = 0.02
             burst = 4
@@ -93,8 +103,23 @@ class StrategyEngine:
             self._variant_seed += 1
 
         for path_id in metrics.keys():
-            family_id = self.family_ids[(self._family_index + path_id) % len(self.family_ids)]
-            variant_id = (self._variant_seed + path_id) % 2
+            if self.mode == "baseline_delay":
+                family_id = 1
+                variant_id = 0
+                enable_shaping = False
+                enable_padding = False
+                enable_pacing = True
+                enable_jitter = True
+            elif self.mode == "baseline_padding":
+                family_id = 1
+                variant_id = 0
+                enable_shaping = True
+                enable_padding = True
+                enable_pacing = False
+                enable_jitter = False
+            else:
+                family_id = self.family_ids[(self._family_index + path_id) % len(self.family_ids)]
+                variant_id = (self._variant_seed + path_id) % 2
             family_by_path[path_id] = family_id
             variant_by_path[path_id] = variant_id
             behavior_by_path[path_id] = BehaviorParams(
@@ -105,6 +130,10 @@ class StrategyEngine:
                 rate_bytes_per_sec=rate,
                 burst_size=burst,
                 obfuscation_level=level,
+                enable_shaping=enable_shaping,
+                enable_padding=enable_padding,
+                enable_pacing=enable_pacing,
+                enable_jitter=enable_jitter,
             )
 
         return StrategyOutput(

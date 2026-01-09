@@ -24,6 +24,7 @@ from logger import setup_logger
 from obfuscation import ProtoObfuscator
 from scheduler import MultiPathScheduler
 from strategy import StrategyEngine
+from run_context import get_run_context
 
 
 LOGGER = setup_logger("exit")
@@ -39,6 +40,7 @@ def parse_args() -> argparse.Namespace:
 class ExitNode:
     def __init__(self, config=DEFAULT_CONFIG) -> None:
         self.config = config
+        self.run_context = get_run_context(config)
         self.proto = ProtoObfuscator()
         base_params = BehaviorParams(
             size_bins=config.size_bins,
@@ -48,13 +50,22 @@ class ExitNode:
             rate_bytes_per_sec=config.base_rate_bytes_per_sec,
             burst_size=6,
             obfuscation_level=config.obfuscation_level,
+            enable_shaping=True,
+            enable_padding=True,
+            enable_pacing=True,
+            enable_jitter=True,
+        )
+        self.active_middle_ports = (
+            [config.middle_ports[0]]
+            if config.mode.startswith("baseline")
+            else list(config.middle_ports)
         )
         self.behavior = BehaviorShaper(
             base_params,
-            path_ids=list(range(len(config.middle_ports))),
+            path_ids=list(range(len(self.active_middle_ports))),
         )
         self.scheduler = MultiPathScheduler(
-            path_ids=list(range(len(config.middle_ports))),
+            path_ids=list(range(len(self.active_middle_ports))),
             batch_size=config.batch_size,
         )
         self.strategy = StrategyEngine(
@@ -64,6 +75,7 @@ class ExitNode:
             family_ids=[1, 2, 3],
             base_rate=config.base_rate_bytes_per_sec,
             obfuscation_level=config.obfuscation_level,
+            mode=config.mode,
         )
         self.fragment_buffer = FragmentBuffer()
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
@@ -73,10 +85,10 @@ class ExitNode:
         self._window_task: asyncio.Task | None = None
         self.window_id = 0
         self.family_by_path: Dict[int, int] = {
-            path_id: 1 for path_id in range(len(config.middle_ports))
+            path_id: 1 for path_id in range(len(self.active_middle_ports))
         }
         self.variant_by_path: Dict[int, int] = {
-            path_id: 0 for path_id in range(len(config.middle_ports))
+            path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
 
     async def connect_server(self) -> None:
@@ -152,6 +164,9 @@ class ExitNode:
                 return
             path_id = self.scheduler.choose_path_from(available_paths)
             target_len = self.behavior.sample_target_len(path_id)
+            params = self.behavior.params_by_path[path_id]
+            if not params.enable_shaping:
+                target_len = len(remaining)
             piece = remaining[:target_len]
             remaining = remaining[target_len:]
             fragments.append((path_id, piece))
@@ -179,7 +194,8 @@ class ExitNode:
             out_frame = self.proto.encode_payload(out_frame, family_id, variant_id)
             await self.behavior.pace(path_id, len(payload))
             jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
-            await asyncio.sleep(jitter_ms / 1000 * random.random())
+            if self.behavior.params_by_path[path_id].enable_jitter:
+                await asyncio.sleep(jitter_ms / 1000 * random.random())
             writer.write(out_frame.encode())
             await writer.drain()
             if self.behavior.update_burst(path_id):
@@ -221,6 +237,7 @@ class ExitNode:
                     "rtt_ms": stats["rtt_ms"],
                     "loss": stats["loss"],
                 }
+                self.run_context.write_window_log(log_entry)
                 LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
 
 

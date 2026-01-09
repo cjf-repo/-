@@ -24,6 +24,7 @@ from frames import (
 from logger import setup_logger
 from obfuscation import ProtoObfuscator
 from scheduler import MultiPathScheduler
+from run_context import get_run_context
 from strategy import StrategyEngine
 
 
@@ -41,6 +42,7 @@ def parse_args() -> argparse.Namespace:
 class EntryNode:
     def __init__(self, config=DEFAULT_CONFIG) -> None:
         self.config = config
+        self.run_context = get_run_context(config)
         self.session_id = random.randint(1, 2**32 - 1)
         self.window_id = 0
         self.seq_counter = 0
@@ -53,10 +55,19 @@ class EntryNode:
             rate_bytes_per_sec=config.base_rate_bytes_per_sec,
             burst_size=6,
             obfuscation_level=config.obfuscation_level,
+            enable_shaping=True,
+            enable_padding=True,
+            enable_pacing=True,
+            enable_jitter=True,
+        )
+        self.active_middle_ports = (
+            [config.middle_ports[0]]
+            if config.mode.startswith("baseline")
+            else list(config.middle_ports)
         )
         self.behavior = BehaviorShaper(
             base_params,
-            path_ids=list(range(len(config.middle_ports))),
+            path_ids=list(range(len(self.active_middle_ports))),
         )
         self.strategy = StrategyEngine(
             size_bins=config.size_bins,
@@ -65,9 +76,10 @@ class EntryNode:
             family_ids=[1, 2, 3],
             base_rate=config.base_rate_bytes_per_sec,
             obfuscation_level=config.obfuscation_level,
+            mode=config.mode,
         )
         self.scheduler = MultiPathScheduler(
-            path_ids=list(range(len(config.middle_ports))),
+            path_ids=list(range(len(self.active_middle_ports))),
             batch_size=config.batch_size,
         )
         self.timeout_events = 0
@@ -75,15 +87,15 @@ class EntryNode:
         self._next_down_seq = 0
         self._pending_down: Dict[int, bytes] = {}
         self.family_by_path: Dict[int, int] = {
-            path_id: 1 for path_id in range(len(config.middle_ports))
+            path_id: 1 for path_id in range(len(self.active_middle_ports))
         }
         self.variant_by_path: Dict[int, int] = {
-            path_id: 0 for path_id in range(len(config.middle_ports))
+            path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         conns = []
-        for port in self.config.middle_ports:
+        for port in self.active_middle_ports:
             reader, writer = await asyncio.open_connection(self.config.middle_host, port)
             conns.append((reader, writer))
             LOGGER.info("已连接到中继 %s", port)
@@ -129,6 +141,7 @@ class EntryNode:
                     "rtt_ms": stats["rtt_ms"],
                     "loss": stats["loss"],
                 }
+                self.run_context.write_window_log(log_entry)
                 LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
             self.timeout_events = 0
 
@@ -185,7 +198,8 @@ class EntryNode:
         fragments: List[tuple[int, bytes]] = []
         while remaining:
             path_id = self.scheduler.choose_path()
-            target_len = self.behavior.sample_target_len(path_id)
+            params = self.behavior.params_by_path[path_id]
+            target_len = len(remaining) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
             piece = remaining[:target_len]
             remaining = remaining[target_len:]
             fragments.append((path_id, piece))
@@ -211,7 +225,8 @@ class EntryNode:
             self.scheduler.mark_sent(path_id, seq)
             await self.behavior.pace(path_id, len(payload))
             jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
-            await asyncio.sleep(jitter_ms / 1000 * random.random())
+            if self.behavior.params_by_path[path_id].enable_jitter:
+                await asyncio.sleep(jitter_ms / 1000 * random.random())
             _, writer = path_conns[path_id]
             writer.write(frame.encode())
             await writer.drain()
