@@ -33,6 +33,8 @@ class Config:
     jitter_ms: int = 20
     batch_size: int = 4
     redundancy: int = 0
+    base_rate_bytes_per_sec: int = 50000
+    obfuscation_level: int = 2
 
     ack_timeout_sec: float = 2.0
 

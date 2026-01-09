@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import random
+import time
 import struct
 from typing import Dict, List
 
@@ -21,6 +23,7 @@ from frames import (
 from logger import setup_logger
 from obfuscation import ProtoObfuscator
 from scheduler import MultiPathScheduler
+from strategy import StrategyEngine
 
 
 LOGGER = setup_logger("exit")
@@ -37,22 +40,44 @@ class ExitNode:
     def __init__(self, config=DEFAULT_CONFIG) -> None:
         self.config = config
         self.proto = ProtoObfuscator()
+        base_params = BehaviorParams(
+            size_bins=config.size_bins,
+            q_dist=[1 / len(config.size_bins) for _ in config.size_bins],
+            padding_alpha=config.padding_alpha,
+            jitter_ms=config.jitter_ms,
+            rate_bytes_per_sec=config.base_rate_bytes_per_sec,
+            burst_size=6,
+            obfuscation_level=config.obfuscation_level,
+        )
         self.behavior = BehaviorShaper(
-            BehaviorParams(
-                size_bins=config.size_bins,
-                padding_alpha=config.padding_alpha,
-                jitter_ms=config.jitter_ms,
-            )
+            base_params,
+            path_ids=list(range(len(config.middle_ports))),
         )
         self.scheduler = MultiPathScheduler(
             path_ids=list(range(len(config.middle_ports))),
             batch_size=config.batch_size,
+        )
+        self.strategy = StrategyEngine(
+            size_bins=config.size_bins,
+            base_padding=config.padding_alpha,
+            base_jitter=config.jitter_ms,
+            family_ids=[1, 2, 3],
+            base_rate=config.base_rate_bytes_per_sec,
+            obfuscation_level=config.obfuscation_level,
         )
         self.fragment_buffer = FragmentBuffer()
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
         self._server_lock = asyncio.Lock()
+        self._window_task: asyncio.Task | None = None
+        self.window_id = 0
+        self.family_by_path: Dict[int, int] = {
+            path_id: 1 for path_id in range(len(config.middle_ports))
+        }
+        self.variant_by_path: Dict[int, int] = {
+            path_id: 0 for path_id in range(len(config.middle_ports))
+        }
 
     async def connect_server(self) -> None:
         reader, writer = await asyncio.open_connection(
@@ -67,6 +92,8 @@ class ExitNode:
     ) -> None:
         addr = writer.get_extra_info("peername")
         LOGGER.info("中继节点已连接 %s", addr)
+        if self._window_task is None:
+            self._window_task = asyncio.create_task(self.start_window_loop())
         try:
             while True:
                 frame = await Frame.read_from(reader)
@@ -117,32 +144,81 @@ class ExitNode:
         await self.send_downlink(frame, response)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
-        profile = self.proto.pick_profile()
-        frame_size = profile.pick_frame_size()
-        fragments = [data[i : i + frame_size] for i in range(0, len(data), frame_size)]
-        total = len(fragments)
-        for frag_id, payload in enumerate(fragments):
+        remaining = data
+        fragments: List[tuple[int, bytes]] = []
+        while remaining:
             path_id = self.scheduler.choose_path()
+            target_len = self.behavior.sample_target_len(path_id)
+            piece = remaining[:target_len]
+            remaining = remaining[target_len:]
+            fragments.append((path_id, piece))
+            self.behavior.note_real_bytes(path_id, len(piece))
+        total = len(fragments)
+        for frag_id, (path_id, payload) in enumerate(fragments):
             writer = self.path_writers.get(path_id)
             if not writer:
                 continue
+            family_id = self.family_by_path.get(path_id, 1)
+            variant_id = self.variant_by_path.get(path_id, 0)
             out_frame = Frame(
                 session_id=frame.session_id,
                 seq=frame.seq,
                 direction=DIR_DOWN,
                 path_id=path_id,
                 window_id=frame.window_id,
-                proto_id=profile.proto_id,
+                proto_id=family_id,
                 flags=FLAG_FRAGMENT,
                 frag_id=frag_id,
                 frag_total=total,
                 payload=payload,
             )
-            out_frame = self.proto.apply(out_frame)
-            out_frame = self.proto.encode_payload(out_frame)
-            await asyncio.sleep(self.behavior.params.jitter_ms / 1000 * random.random())
+            out_frame = self.proto.apply(out_frame, family_id, variant_id)
+            out_frame = self.proto.encode_payload(out_frame, family_id, variant_id)
+            await self.behavior.pace(path_id, len(payload))
+            jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
+            await asyncio.sleep(jitter_ms / 1000 * random.random())
             writer.write(out_frame.encode())
             await writer.drain()
+            if self.behavior.update_burst(path_id):
+                template = out_frame
+                for padding in self.behavior.make_padding_frames(template):
+                    writer.write(padding.encode())
+                    await writer.drain()
+
+    async def start_window_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.window_size_sec)
+            self.window_id += 1
+            metrics = self.scheduler.snapshot()
+            output = self.strategy.evaluate(metrics, 0)
+            self.scheduler.update_weights(output.weights)
+            self.family_by_path = output.family_by_path
+            self.variant_by_path = output.variant_by_path
+            for path_id, params in output.behavior_by_path.items():
+                self.behavior.set_params(path_id, params)
+                drift = 0.02 if output.obfuscation_level == 1 else 0.05 if output.obfuscation_level == 2 else 0.08
+                if output.obfuscation_level == 0:
+                    drift = 0.0
+                self.behavior.update_q_dist(path_id, drift, seed=self.window_id * 100 + path_id)
+            self.behavior.start_window(self.window_id)
+            self.proto.start_window(self.window_id, output.family_by_path, output.variant_by_path)
+            for path_id, stats in metrics.items():
+                behavior = output.behavior_by_path[path_id]
+                pad_bytes = self.behavior.path_states[path_id].padding_bytes
+                log_entry = {
+                    "window_id": self.window_id,
+                    "path_id": path_id,
+                    "obfuscation_level": output.obfuscation_level,
+                    "alpha_padding": behavior.padding_alpha,
+                    "rate_bytes_per_sec": behavior.rate_bytes_per_sec,
+                    "jitter_ms": behavior.jitter_ms,
+                    "proto_family": output.family_by_path[path_id],
+                    "proto_variant": output.variant_by_path[path_id],
+                    "padding_bytes": pad_bytes,
+                    "rtt_ms": stats["rtt_ms"],
+                    "loss": stats["loss"],
+                }
+                LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
 
 
 async def main() -> None:

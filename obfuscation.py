@@ -2,57 +2,74 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List, Tuple
 
 from frames import Frame
-from profiles import ProtoProfile, build_handshake_frames, default_profiles
+from profiles import ProtoFamily, ProtoVariant, build_handshake_frames, default_profiles
 
 
 @dataclass
 class ProtoState:
-    proto_id: int
+    family_id: int
     window_id: int
 
 
 class ProtoObfuscator:
     def __init__(self) -> None:
-        self.profiles = {profile.proto_id: profile for profile in default_profiles()}
-        self.state = ProtoState(proto_id=1, window_id=0)
+        self.families = {family.family_id: family for family in default_profiles()}
+        self.state = ProtoState(family_id=1, window_id=0)
+        self.variant_by_path: Dict[int, int] = {}
 
-    def start_window(self, window_id: int, proto_id: int | None = None) -> None:
-        if proto_id is None:
-            proto_id = self.state.proto_id
-        self.state = ProtoState(proto_id=proto_id, window_id=window_id)
+    def start_window(
+        self,
+        window_id: int,
+        family_by_path: Dict[int, int],
+        variant_by_path: Dict[int, int],
+    ) -> None:
+        self.state = ProtoState(family_id=1, window_id=window_id)
+        self.variant_by_path = variant_by_path
 
-    def pick_profile(self) -> ProtoProfile:
-        return self.profiles[self.state.proto_id]
+    def pick_family(self, family_id: int) -> ProtoFamily:
+        return self.families[family_id]
 
     def rotate_profile(self) -> None:
-        ids = sorted(self.profiles)
-        current_index = ids.index(self.state.proto_id)
-        self.state.proto_id = ids[(current_index + 1) % len(ids)]
+        ids = sorted(self.families)
+        current_index = ids.index(self.state.family_id)
+        self.state.family_id = ids[(current_index + 1) % len(ids)]
 
-    def apply(self, frame: Frame) -> Frame:
+    def apply(self, frame: Frame, family_id: int, variant_id: int) -> Frame:
         # 为当前窗口选择的模板写入 proto_id，并随机化额外头
-        profile = self.pick_profile()
-        frame.proto_id = profile.proto_id
-        frame.extra_header = profile.pick_extra_header()
+        family = self.pick_family(family_id)
+        variant = family.variants[variant_id % len(family.variants)]
+        frame.proto_id = family.family_id
+        frame.extra_header = family.pick_extra_header(variant)
         return frame
 
-    def encode_payload(self, frame: Frame) -> Frame:
-        profile = self.profiles.get(frame.proto_id)
-        if profile is None:
+    def encode_payload(self, frame: Frame, family_id: int, variant_id: int) -> Frame:
+        family = self.families.get(family_id)
+        if family is None:
             return frame
-        frame.payload = profile.encode_payload(frame.payload)
+        variant = family.variants[variant_id % len(family.variants)]
+        frame.payload = family.encode_payload(frame.payload, variant)
         return frame
 
     def decode_payload(self, frame: Frame) -> Frame:
-        profile = self.profiles.get(frame.proto_id)
-        if profile is None:
+        family = self.families.get(frame.proto_id)
+        if family is None:
             return frame
-        frame.payload = profile.decode_payload(frame.payload)
+        variant_id = frame.extra_header[0] if frame.extra_header else 0
+        variant = family.variants[variant_id % len(family.variants)]
+        frame.payload = family.decode_payload(frame.payload, variant)
         return frame
 
-    def handshake_frames(self, session_id: int, path_id: int) -> List[tuple[Frame, int]]:
-        profile = self.pick_profile()
-        return build_handshake_frames(session_id, self.state.window_id, profile, path_id)
+    def handshake_frames(
+        self,
+        session_id: int,
+        path_id: int,
+        family_id: int,
+        variant_id: int,
+    ) -> List[tuple[Frame, int]]:
+        family = self.pick_family(family_id)
+        return build_handshake_frames(
+            session_id, self.state.window_id, family, path_id, variant_id
+        )

@@ -19,6 +19,7 @@ class FrameSummary:
     path_id: int
     window_id: int
     proto_id: int
+    variant_id: int
     flags: int
     frag_id: int
     frag_total: int
@@ -38,7 +39,7 @@ class FrameTap:
             if summary is None:
                 break
             LOGGER.info(
-                "%s 帧: session=%s seq=%s dir=%s path=%s window=%s proto=%s flags=0x%02x frag=%s/%s extra=%s payload=%s",
+                "%s 帧: session=%s seq=%s dir=%s path=%s window=%s proto=%s variant=%s flags=0x%02x frag=%s/%s extra=%s payload=%s",
                 self.label,
                 summary.session_id,
                 summary.seq,
@@ -46,6 +47,7 @@ class FrameTap:
                 summary.path_id,
                 summary.window_id,
                 summary.proto_id,
+                summary.variant_id,
                 summary.flags,
                 summary.frag_id,
                 summary.frag_total,
@@ -72,6 +74,7 @@ class FrameTap:
         total_len = HEADER_STRUCT.size + extra_len + 1 + payload_len
         if len(self._buffer) < total_len:
             return None
+        variant_id = self._buffer[HEADER_STRUCT.size] if extra_len else 0
         flags_index = HEADER_STRUCT.size + extra_len
         flags = self._buffer[flags_index]
         del self._buffer[:total_len]
@@ -82,6 +85,7 @@ class FrameTap:
             path_id=path_id,
             window_id=window_id,
             proto_id=proto_id,
+            variant_id=variant_id,
             flags=flags,
             frag_id=frag_id,
             frag_total=frag_total,

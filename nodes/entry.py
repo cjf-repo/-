@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import random
 import struct
 import time
@@ -15,6 +16,8 @@ from frames import (
     DIR_UP,
     FLAG_ACK,
     FLAG_FRAGMENT,
+    FLAG_HANDSHAKE,
+    FLAG_PADDING,
     Frame,
     FragmentBuffer,
 )
@@ -42,18 +45,26 @@ class EntryNode:
         self.window_id = 0
         self.seq_counter = 0
         self.proto = ProtoObfuscator()
+        base_params = BehaviorParams(
+            size_bins=config.size_bins,
+            q_dist=[1 / len(config.size_bins) for _ in config.size_bins],
+            padding_alpha=config.padding_alpha,
+            jitter_ms=config.jitter_ms,
+            rate_bytes_per_sec=config.base_rate_bytes_per_sec,
+            burst_size=6,
+            obfuscation_level=config.obfuscation_level,
+        )
         self.behavior = BehaviorShaper(
-            BehaviorParams(
-                size_bins=config.size_bins,
-                padding_alpha=config.padding_alpha,
-                jitter_ms=config.jitter_ms,
-            )
+            base_params,
+            path_ids=list(range(len(config.middle_ports))),
         )
         self.strategy = StrategyEngine(
             size_bins=config.size_bins,
             base_padding=config.padding_alpha,
             base_jitter=config.jitter_ms,
-            proto_ids=[1, 2, 3],
+            family_ids=[1, 2, 3],
+            base_rate=config.base_rate_bytes_per_sec,
+            obfuscation_level=config.obfuscation_level,
         )
         self.scheduler = MultiPathScheduler(
             path_ids=list(range(len(config.middle_ports))),
@@ -63,6 +74,12 @@ class EntryNode:
         self._window_task: asyncio.Task | None = None
         self._next_down_seq = 0
         self._pending_down: Dict[int, bytes] = {}
+        self.family_by_path: Dict[int, int] = {
+            path_id: 1 for path_id in range(len(config.middle_ports))
+        }
+        self.variant_by_path: Dict[int, int] = {
+            path_id: 0 for path_id in range(len(config.middle_ports))
+        }
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         conns = []
@@ -86,22 +103,42 @@ class EntryNode:
             metrics = self.scheduler.snapshot()
             output = self.strategy.evaluate(metrics, self.timeout_events)
             self.scheduler.update_weights(output.weights)
-            self.behavior.params = output.behavior
+            self.family_by_path = output.family_by_path
+            self.variant_by_path = output.variant_by_path
+            for path_id, params in output.behavior_by_path.items():
+                self.behavior.set_params(path_id, params)
+                drift = 0.02 if output.obfuscation_level == 1 else 0.05 if output.obfuscation_level == 2 else 0.08
+                if output.obfuscation_level == 0:
+                    drift = 0.0
+                self.behavior.update_q_dist(path_id, drift, seed=self.window_id * 100 + path_id)
             self.behavior.start_window(self.window_id)
-            self.proto.start_window(self.window_id, output.proto_id)
-            LOGGER.info(
-                "时间窗 %s 更新：权重=%s 填充=%.3f 抖动=%sms 协议=%s",
-                self.window_id,
-                output.weights,
-                output.behavior.padding_alpha,
-                output.behavior.jitter_ms,
-                output.proto_id,
-            )
+            self.proto.start_window(self.window_id, output.family_by_path, output.variant_by_path)
+            for path_id, stats in metrics.items():
+                behavior = output.behavior_by_path[path_id]
+                pad_bytes = self.behavior.path_states[path_id].padding_bytes
+                log_entry = {
+                    "window_id": self.window_id,
+                    "path_id": path_id,
+                    "obfuscation_level": output.obfuscation_level,
+                    "alpha_padding": behavior.padding_alpha,
+                    "rate_bytes_per_sec": behavior.rate_bytes_per_sec,
+                    "jitter_ms": behavior.jitter_ms,
+                    "proto_family": output.family_by_path[path_id],
+                    "proto_variant": output.variant_by_path[path_id],
+                    "padding_bytes": pad_bytes,
+                    "rtt_ms": stats["rtt_ms"],
+                    "loss": stats["loss"],
+                }
+                LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
             self.timeout_events = 0
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         for path_id, (_, writer) in enumerate(conns):
-            for frame, delay_ms in self.proto.handshake_frames(self.session_id, path_id):
+            family_id = self.family_by_path.get(path_id, 1)
+            variant_id = self.variant_by_path.get(path_id, 0)
+            for frame, delay_ms in self.proto.handshake_frames(
+                self.session_id, path_id, family_id, variant_id
+            ):
                 writer.write(frame.encode())
                 await writer.drain()
                 await asyncio.sleep(delay_ms / 1000)
@@ -117,7 +154,7 @@ class EntryNode:
         await self.send_handshake(path_conns)
         if self._window_task is None:
             self.behavior.start_window(self.window_id)
-            self.proto.start_window(self.window_id)
+            self.proto.start_window(self.window_id, self.family_by_path, self.variant_by_path)
             self._window_task = asyncio.create_task(self.start_window_loop())
         self._next_down_seq = 0
         self._pending_down = {}
@@ -130,9 +167,7 @@ class EntryNode:
                 data = await reader.read(2048)
                 if not data:
                     break
-                chunks = self.behavior.shape_payload(data)
-                for chunk in chunks:
-                    await self.send_chunk(chunk, path_conns)
+                await self.send_chunk(data, path_conns)
         except asyncio.IncompleteReadError:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
@@ -146,36 +181,45 @@ class EntryNode:
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         seq = self.seq_counter
         self.seq_counter += 1
-        profile = self.proto.pick_profile()
-        frame_size = profile.pick_frame_size()
-        # 上行按模板粒度拆分成多个分片
-        fragments = [data[i : i + frame_size] for i in range(0, len(data), frame_size)]
-        total = len(fragments)
-        for frag_id, payload in enumerate(fragments):
+        remaining = data
+        fragments: List[tuple[int, bytes]] = []
+        while remaining:
             path_id = self.scheduler.choose_path()
+            target_len = self.behavior.sample_target_len(path_id)
+            piece = remaining[:target_len]
+            remaining = remaining[target_len:]
+            fragments.append((path_id, piece))
+            self.behavior.note_real_bytes(path_id, len(piece))
+        total = len(fragments)
+        for frag_id, (path_id, payload) in enumerate(fragments):
+            family_id = self.family_by_path.get(path_id, 1)
+            variant_id = self.variant_by_path.get(path_id, 0)
             frame = Frame(
                 session_id=self.session_id,
                 seq=seq,
                 direction=DIR_UP,
                 path_id=path_id,
                 window_id=self.window_id,
-                proto_id=profile.proto_id,
+                proto_id=family_id,
                 flags=FLAG_FRAGMENT,
                 frag_id=frag_id,
                 frag_total=total,
                 payload=payload,
             )
-            frame = self.proto.apply(frame)
-            frame = self.proto.encode_payload(frame)
+            frame = self.proto.apply(frame, family_id, variant_id)
+            frame = self.proto.encode_payload(frame, family_id, variant_id)
             self.scheduler.mark_sent(path_id, seq)
-            await asyncio.sleep(self.behavior.params.jitter_ms / 1000 * random.random())
+            await self.behavior.pace(path_id, len(payload))
+            jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
+            await asyncio.sleep(jitter_ms / 1000 * random.random())
             _, writer = path_conns[path_id]
             writer.write(frame.encode())
             await writer.drain()
-            template = frame
-            for padding in self.behavior.make_padding_frames(template):
-                writer.write(padding.encode())
-                await writer.drain()
+            if self.behavior.update_burst(path_id):
+                template = frame
+                for padding in self.behavior.make_padding_frames(template):
+                    writer.write(padding.encode())
+                    await writer.drain()
 
     async def read_from_paths(
         self,
@@ -202,14 +246,14 @@ class EntryNode:
             if frame.direction != DIR_DOWN:
                 continue
             if frame.flags & FLAG_FRAGMENT:
-                if not (frame.flags & FLAG_ACK):
+                if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
                 await self.enqueue_downlink(frame.seq, payload, client_writer)
             else:
-                if not (frame.flags & FLAG_ACK):
+                if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
                 await self.enqueue_downlink(frame.seq, frame.payload, client_writer)
 
