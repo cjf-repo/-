@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import List, Sequence
+from enum import Enum
+from typing import List, Sequence, Tuple
 
 from frames import DIR_DOWN, DIR_UP, Frame, FLAG_HANDSHAKE
 
@@ -14,12 +15,19 @@ class HandshakeSpec:
     delay_ms: int
 
 
+class ObfuscationMode(Enum):
+    NONE = "none"
+    XOR = "xor"
+    XOR_REVERSE = "xor_reverse"
+
+
 @dataclass
 class ProtoProfile:
     proto_id: int
     handshake: Sequence[HandshakeSpec]
     frame_sizes: Sequence[int]
     extra_header_range: tuple[int, int]
+    obfuscation_mode: ObfuscationMode
 
     def pick_frame_size(self) -> int:
         return random.choice(self.frame_sizes)
@@ -28,6 +36,28 @@ class ProtoProfile:
         low, high = self.extra_header_range
         length = random.randint(low, high)
         return random.randbytes(length) if length else b""
+
+    def encode_payload(self, payload: bytes) -> bytes:
+        if not payload:
+            return payload
+        if self.obfuscation_mode is ObfuscationMode.NONE:
+            return payload
+        key = random.randint(1, 255)
+        obfuscated = bytes([b ^ key for b in payload])
+        if self.obfuscation_mode is ObfuscationMode.XOR_REVERSE:
+            obfuscated = obfuscated[::-1]
+        return bytes([key]) + obfuscated
+
+    def decode_payload(self, payload: bytes) -> bytes:
+        if not payload:
+            return payload
+        if self.obfuscation_mode is ObfuscationMode.NONE:
+            return payload
+        key = payload[0]
+        data = payload[1:]
+        if self.obfuscation_mode is ObfuscationMode.XOR_REVERSE:
+            data = data[::-1]
+        return bytes([b ^ key for b in data])
 
 
 def default_profiles() -> List[ProtoProfile]:
@@ -40,6 +70,7 @@ def default_profiles() -> List[ProtoProfile]:
             ],
             frame_sizes=[256, 384, 512],
             extra_header_range=(0, 4),
+            obfuscation_mode=ObfuscationMode.NONE,
         ),
         ProtoProfile(
             proto_id=2,
@@ -49,6 +80,7 @@ def default_profiles() -> List[ProtoProfile]:
             ],
             frame_sizes=[300, 450, 600, 750],
             extra_header_range=(2, 8),
+            obfuscation_mode=ObfuscationMode.XOR,
         ),
         ProtoProfile(
             proto_id=3,
@@ -58,6 +90,7 @@ def default_profiles() -> List[ProtoProfile]:
             ],
             frame_sizes=[200, 400, 800],
             extra_header_range=(4, 12),
+            obfuscation_mode=ObfuscationMode.XOR_REVERSE,
         ),
     ]
 
@@ -67,8 +100,8 @@ def build_handshake_frames(
     window_id: int,
     profile: ProtoProfile,
     path_id: int,
-) -> List[Frame]:
-    frames: List[Frame] = []
+) -> List[Tuple[Frame, int]]:
+    frames: List[Tuple[Frame, int]] = []
     seq = 0
     for spec in profile.handshake:
         payload = random.randbytes(spec.size)
@@ -85,6 +118,6 @@ def build_handshake_frames(
             payload=payload,
             extra_header=profile.pick_extra_header(),
         )
-        frames.append(frame)
+        frames.append((frame, spec.delay_ms))
         seq += 1
     return frames

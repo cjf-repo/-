@@ -99,10 +99,10 @@ class EntryNode:
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         for path_id, (_, writer) in enumerate(conns):
-            for frame in self.proto.handshake_frames(self.session_id, path_id):
+            for frame, delay_ms in self.proto.handshake_frames(self.session_id, path_id):
                 writer.write(frame.encode())
                 await writer.drain()
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(delay_ms / 1000)
 
     async def handle_client(
         self,
@@ -164,6 +164,7 @@ class EntryNode:
                 payload=payload,
             )
             frame = self.proto.apply(frame)
+            frame = self.proto.encode_payload(frame)
             self.scheduler.mark_sent(path_id, seq)
             await asyncio.sleep(self.behavior.params.jitter_ms / 1000 * random.random())
             _, writer = path_conns[path_id]
@@ -199,11 +200,15 @@ class EntryNode:
             if frame.direction != DIR_DOWN:
                 continue
             if frame.flags & FLAG_FRAGMENT:
+                if not (frame.flags & FLAG_ACK):
+                    frame = self.proto.decode_payload(frame)
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
                 await self.enqueue_downlink(frame.seq, payload, client_writer)
             else:
+                if not (frame.flags & FLAG_ACK):
+                    frame = self.proto.decode_payload(frame)
                 await self.enqueue_downlink(frame.seq, frame.payload, client_writer)
 
     async def enqueue_downlink(

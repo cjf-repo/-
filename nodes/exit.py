@@ -71,8 +71,9 @@ class ExitNode:
             while True:
                 frame = await Frame.read_from(reader)
                 self.path_writers[frame.path_id] = writer
-                if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+                if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_ACK):
                     continue
+                frame = self.proto.decode_payload(frame)
                 if frame.flags & FLAG_FRAGMENT:
                     complete, payload = self.fragment_buffer.add(frame)
                     if not complete:
@@ -138,6 +139,7 @@ class ExitNode:
                 payload=payload,
             )
             out_frame = self.proto.apply(out_frame)
+            out_frame = self.proto.encode_payload(out_frame)
             await asyncio.sleep(self.behavior.params.jitter_ms / 1000 * random.random())
             writer.write(out_frame.encode())
             await writer.drain()

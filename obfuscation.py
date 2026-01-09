@@ -39,6 +39,20 @@ class ProtoObfuscator:
         frame.extra_header = profile.pick_extra_header()
         return frame
 
-    def handshake_frames(self, session_id: int, path_id: int) -> List[Frame]:
+    def encode_payload(self, frame: Frame) -> Frame:
+        profile = self.profiles.get(frame.proto_id)
+        if profile is None:
+            return frame
+        frame.payload = profile.encode_payload(frame.payload)
+        return frame
+
+    def decode_payload(self, frame: Frame) -> Frame:
+        profile = self.profiles.get(frame.proto_id)
+        if profile is None:
+            return frame
+        frame.payload = profile.decode_payload(frame.payload)
+        return frame
+
+    def handshake_frames(self, session_id: int, path_id: int) -> List[tuple[Frame, int]]:
         profile = self.pick_profile()
         return build_handshake_frames(session_id, self.state.window_id, profile, path_id)
