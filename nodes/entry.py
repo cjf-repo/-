@@ -77,6 +77,10 @@ class EntryNode:
             base_rate=config.base_rate_bytes_per_sec,
             obfuscation_level=config.obfuscation_level,
             mode=config.mode,
+            proto_switch_period=config.proto_switch_period,
+            adaptive_paths=config.adaptive_paths,
+            adaptive_behavior=config.adaptive_behavior,
+            adaptive_proto=config.adaptive_proto,
         )
         self.scheduler = MultiPathScheduler(
             path_ids=list(range(len(self.active_middle_ports))),
@@ -113,7 +117,7 @@ class EntryNode:
                     self.timeout_events += 1
             self.window_id += 1
             metrics = self.scheduler.snapshot()
-            output = self.strategy.evaluate(metrics, self.timeout_events)
+            output = self.strategy.evaluate(metrics, self.timeout_events, self.window_id)
             self.scheduler.update_weights(output.weights)
             self.family_by_path = output.family_by_path
             self.variant_by_path = output.variant_by_path
@@ -122,12 +126,14 @@ class EntryNode:
                 drift = 0.02 if output.obfuscation_level == 1 else 0.05 if output.obfuscation_level == 2 else 0.08
                 if output.obfuscation_level == 0:
                     drift = 0.0
-                self.behavior.update_q_dist(path_id, drift, seed=self.window_id * 100 + path_id)
+                if output.adaptive_flags["adaptive_behavior"]:
+                    self.behavior.update_q_dist(path_id, drift, seed=self.window_id * 100 + path_id)
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id, output.family_by_path, output.variant_by_path)
             for path_id, stats in metrics.items():
                 behavior = output.behavior_by_path[path_id]
                 pad_bytes = self.behavior.path_states[path_id].padding_bytes
+                real_bytes = self.behavior.path_states[path_id].real_bytes
                 log_entry = {
                     "window_id": self.window_id,
                     "path_id": path_id,
@@ -138,8 +144,12 @@ class EntryNode:
                     "proto_family": output.family_by_path[path_id],
                     "proto_variant": output.variant_by_path[path_id],
                     "padding_bytes": pad_bytes,
+                    "real_bytes": real_bytes,
                     "rtt_ms": stats["rtt_ms"],
                     "loss": stats["loss"],
+                    "trigger": output.trigger,
+                    "action": output.action,
+                    "adaptive_flags": output.adaptive_flags,
                 }
                 self.run_context.write_window_log(log_entry)
                 LOGGER.info(json.dumps(log_entry, ensure_ascii=False))

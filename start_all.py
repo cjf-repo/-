@@ -11,8 +11,8 @@ from config import DEFAULT_CONFIG
 async def run() -> None:
     processes = []
     python = sys.executable
-    run_id = f"{uuid.uuid4().hex[:8]}"
-    out_dir = f"out/{run_id}"
+    run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
+    out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.server", env=base_env))
     await asyncio.sleep(0.2)

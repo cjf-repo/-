@@ -20,9 +20,14 @@ class RunContext:
     attacker_path_id: int
     seed: int
     window_log_path: Path
+    latency_log_path: Path
 
     def write_window_log(self, record: Dict[str, Any]) -> None:
         with self.window_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def write_latency_log(self, record: Dict[str, Any]) -> None:
+        with self.latency_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -74,6 +79,7 @@ def get_run_context(config: Config = DEFAULT_CONFIG) -> RunContext:
         )
 
     window_log_path = out_dir / "window_logs.jsonl"
+    latency_log_path = out_dir / "latency_logs.jsonl"
     _CONTEXT = RunContext(
         run_id=run_id,
         out_dir=out_dir,
@@ -81,5 +87,6 @@ def get_run_context(config: Config = DEFAULT_CONFIG) -> RunContext:
         attacker_path_id=attacker_path_id,
         seed=seed,
         window_log_path=window_log_path,
+        latency_log_path=latency_log_path,
     )
     return _CONTEXT

@@ -14,6 +14,9 @@ class StrategyOutput:
     family_by_path: Dict[int, int]
     variant_by_path: Dict[int, int]
     obfuscation_level: int
+    trigger: str
+    action: str
+    adaptive_flags: Dict[str, bool]
 
 
 class StrategyEngine:
@@ -26,6 +29,10 @@ class StrategyEngine:
         base_rate: int,
         obfuscation_level: int,
         mode: str,
+        proto_switch_period: int,
+        adaptive_paths: bool,
+        adaptive_behavior: bool,
+        adaptive_proto: bool,
     ) -> None:
         self.size_bins = size_bins
         self.base_padding = base_padding
@@ -34,6 +41,10 @@ class StrategyEngine:
         self.base_rate = base_rate
         self.obfuscation_level = obfuscation_level
         self.mode = mode
+        self.proto_switch_period = proto_switch_period
+        self.adaptive_paths = adaptive_paths
+        self.adaptive_behavior = adaptive_behavior
+        self.adaptive_proto = adaptive_proto
         self._family_index = 0
         self._variant_seed = 0
 
@@ -41,6 +52,7 @@ class StrategyEngine:
         self,
         metrics: Dict[int, Dict[str, float]],
         timeout_events: int,
+        window_id: int,
     ) -> StrategyOutput:
         # 简化的规则引擎：根据 RTT/丢包调整权重与行为参数
         weights: Dict[int, float] = {}
@@ -49,7 +61,7 @@ class StrategyEngine:
         variant_by_path: Dict[int, int] = {}
         for path_id, stats in metrics.items():
             weight = 1.0
-            if stats["loss"] > 0.1 or stats["rtt_ms"] > 200:
+            if self.adaptive_paths and (stats["loss"] > 0.1 or stats["rtt_ms"] > 200):
                 weight *= 0.5
             weights[path_id] = weight
 
@@ -98,9 +110,22 @@ class StrategyEngine:
         size_bins = [int(b * random.uniform(0.9, 1.1)) for b in self.size_bins]
         q_dist = [1 / len(size_bins) for _ in size_bins]
 
-        if timeout_events > 2:
-            self._family_index = (self._family_index + 1) % len(self.family_ids)
-            self._variant_seed += 1
+        trigger = "none"
+        if self.adaptive_proto:
+            if timeout_events > 2:
+                trigger = "timeout"
+            elif window_id % self.proto_switch_period == 0:
+                trigger = "periodic"
+            if trigger != "none":
+                self._family_index = (self._family_index + 1) % len(self.family_ids)
+                self._variant_seed += 1
+        action = "static"
+        if trigger != "none":
+            action = "switch_proto"
+        if self.adaptive_paths and any(weight < 1.0 for weight in weights.values()):
+            action = "update_weights"
+        if self.adaptive_behavior:
+            action = "update_behavior"
 
         for path_id in metrics.keys():
             if self.mode == "baseline_delay":
@@ -120,8 +145,17 @@ class StrategyEngine:
                 enable_pacing = False
                 enable_jitter = False
             else:
-                family_id = self.family_ids[(self._family_index + path_id) % len(self.family_ids)]
-                variant_id = (self._variant_seed + path_id) % 2
+                if self.adaptive_proto:
+                    family_id = self.family_ids[(self._family_index + path_id) % len(self.family_ids)]
+                    variant_id = (self._variant_seed + path_id) % 2
+                else:
+                    family_id = 1
+                    variant_id = 0
+                if not self.adaptive_behavior:
+                    enable_shaping = False
+                    enable_padding = False
+                    enable_pacing = False
+                    enable_jitter = False
             family_by_path[path_id] = family_id
             variant_by_path[path_id] = variant_id
             behavior_by_path[path_id] = BehaviorParams(
@@ -136,6 +170,7 @@ class StrategyEngine:
                 enable_padding=enable_padding,
                 enable_pacing=enable_pacing,
                 enable_jitter=enable_jitter,
+                fixed_q_dist=q_dist if not enable_shaping else None,
             )
 
         return StrategyOutput(
@@ -144,4 +179,11 @@ class StrategyEngine:
             family_by_path=family_by_path,
             variant_by_path=variant_by_path,
             obfuscation_level=level,
+            trigger=trigger,
+            action=action,
+            adaptive_flags={
+                "adaptive_paths": self.adaptive_paths,
+                "adaptive_behavior": self.adaptive_behavior,
+                "adaptive_proto": self.adaptive_proto,
+            },
         )

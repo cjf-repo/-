@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import List
 
 
@@ -37,6 +38,10 @@ class Config:
     obfuscation_level: int = 2
     mode: str = "normal"
     seed: int | None = None
+    proto_switch_period: int = 3
+    adaptive_paths: bool = True
+    adaptive_behavior: bool = True
+    adaptive_proto: bool = True
 
     ack_timeout_sec: float = 2.0
 
@@ -47,4 +52,42 @@ class Config:
         return configs
 
 
-DEFAULT_CONFIG = Config()
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return int(value) if value is not None else default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    return float(value) if value is not None else default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "y"}
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.environ.get(name) or default
+
+
+def load_config_from_env() -> Config:
+    config = Config()
+    path_count = _env_int("PATH_COUNT", len(config.middle_ports))
+    config.middle_ports = config.middle_ports[:path_count]
+    config.padding_alpha = _env_float("ALPHA_PADDING", config.padding_alpha)
+    config.obfuscation_level = _env_int("OBFUSCATION_LEVEL", config.obfuscation_level)
+    config.mode = _env_str("MODE", config.mode)
+    config.proto_switch_period = _env_int("PROTO_SWITCH_PERIOD", config.proto_switch_period)
+    config.adaptive_paths = _env_bool("ADAPTIVE_PATHS", config.adaptive_paths)
+    config.adaptive_behavior = _env_bool("ADAPTIVE_BEHAVIOR", config.adaptive_behavior)
+    config.adaptive_proto = _env_bool("ADAPTIVE_PROTO", config.adaptive_proto)
+    seed = os.environ.get("SEED")
+    if seed is not None:
+        config.seed = int(seed)
+    return config
+
+
+DEFAULT_CONFIG = load_config_from_env()

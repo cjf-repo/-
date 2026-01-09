@@ -21,6 +21,7 @@ class BehaviorParams:
     enable_padding: bool
     enable_pacing: bool
     enable_jitter: bool
+    fixed_q_dist: List[float] | None = None
 
 
 @dataclass
@@ -77,7 +78,8 @@ class BehaviorShaper:
             self.q_dist_by_path[path_id] = params.q_dist[:]
 
     def update_q_dist(self, path_id: int, drift: float, seed: int | None = None) -> None:
-        base = self.params_by_path[path_id].q_dist
+        params = self.params_by_path[path_id]
+        base = params.fixed_q_dist or params.q_dist
         rng = random.Random(seed)
         jittered = []
         for prob in base:
