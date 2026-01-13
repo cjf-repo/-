@@ -113,6 +113,18 @@ class TraceWriter:
                 attacker_tm2.writerow([f"{t:.6f}", direction, total_len])
 
 
+class TrafficCounter:
+    def __init__(self) -> None:
+        self.up_bytes = 0
+        self.down_bytes = 0
+
+    def note(self, direction: str, size: int) -> None:
+        if direction == "up":
+            self.up_bytes += size
+        else:
+            self.down_bytes += size
+
+
 async def bridge(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -120,6 +132,7 @@ async def bridge(
     dest_writer: asyncio.StreamWriter,
     config: PathConfig,
     trace: TraceWriter | None,
+    counter: TrafficCounter | None,
     direction: str,
 ) -> None:
     # 双向转发：模拟丢包/延迟并记录 trace
@@ -130,6 +143,8 @@ async def bridge(
                 break
             if trace is not None:
                 trace.feed(data, direction)
+            if counter is not None:
+                counter.note(direction, len(data))
             if random.random() < config.loss_rate:
                 continue
             delay = config.base_delay_ms + random.randint(0, config.jitter_ms)
@@ -139,6 +154,12 @@ async def bridge(
     except ConnectionResetError:
         LOGGER.warning("转发链路发生连接重置")
     finally:
+        if counter is not None:
+            LOGGER.info(
+                "中继统计 %s 方向 %s 字节",
+                direction,
+                counter.up_bytes if direction == "up" else counter.down_bytes,
+            )
         # 关闭双向连接
         writer.close()
         dest_writer.close()
@@ -159,10 +180,11 @@ async def handle_entry(
     LOGGER.info("入口节点已连接 %s", addr)
     run_context = get_run_context(DEFAULT_CONFIG)
     trace = TraceWriter(run_context, path_id)
+    counter = TrafficCounter()
     exit_reader, exit_writer = await asyncio.open_connection(exit_host, exit_port)
     await asyncio.gather(
-        bridge(reader, writer, exit_reader, exit_writer, config, trace, "up"),
-        bridge(exit_reader, exit_writer, reader, writer, config, None, "down"),
+        bridge(reader, writer, exit_reader, exit_writer, config, trace, counter, "up"),
+        bridge(exit_reader, exit_writer, reader, writer, config, None, counter, "down"),
     )
 
 
