@@ -193,6 +193,9 @@ class EntryNode:
         # 处理客户端连接
         addr = writer.get_extra_info("peername")
         LOGGER.info("客户端已连接 %s", addr)
+        self.session_id = random.randint(1, 2**32 - 1)
+        self.seq_counter = 0
+        self.scheduler.reset_stats()
         path_conns = await self.connect_paths()
         await self.send_handshake(path_conns)
         proxy_buffer = bytearray()
