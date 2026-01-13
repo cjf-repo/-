@@ -46,21 +46,24 @@ async def run() -> None:
     # 启动入口节点
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.entry", env=base_env))
     await asyncio.sleep(0.5)
-    # 启动客户端应用
-    client_proc = await asyncio.create_subprocess_exec(
-        python,
-        "-m",
-        "nodes.client_app",
-        "--duration",
-        "20",
-        "--interval",
-        "0.5",
-        env=base_env,
-    )
-    processes.append(client_proc)
+    # 启动客户端应用（代理模式下由浏览器/curl 触发）
+    client_proc = None
+    if os.environ.get("PROXY_MODE") != "1":
+        client_proc = await asyncio.create_subprocess_exec(
+            python,
+            "-m",
+            "nodes.client_app",
+            "--duration",
+            "20",
+            "--interval",
+            "0.5",
+            env=base_env,
+        )
+        processes.append(client_proc)
 
     # 等待客户端完成后回收子进程
-    await client_proc.wait()
+    if client_proc is not None:
+        await client_proc.wait()
     for proc in processes:
         if proc.returncode is None:
             proc.terminate()

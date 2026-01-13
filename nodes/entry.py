@@ -221,7 +221,12 @@ class EntryNode:
                     header = bytes(proxy_buffer[:header_end])
                     body = bytes(proxy_buffer[header_end:])
                     proxy_buffer.clear()
-                    target, rewritten = self.parse_proxy_request(header)
+                    target, rewritten, error_response = self.parse_proxy_request(header)
+                    if error_response is not None:
+                        writer.write(error_response)
+                        await writer.drain()
+                        LOGGER.error("代理请求解析失败，关闭连接")
+                        break
                     if target is None or rewritten is None:
                         LOGGER.error("代理请求解析失败，关闭连接")
                         break
@@ -241,27 +246,29 @@ class EntryNode:
                 path_writer.close()
                 await path_writer.wait_closed()
 
-    def parse_proxy_request(self, header: bytes) -> tuple[tuple[str, int] | None, bytes | None]:
+    def parse_proxy_request(
+        self, header: bytes
+    ) -> tuple[tuple[str, int] | None, bytes | None, bytes | None]:
         try:
             text = header.decode("iso-8859-1")
         except UnicodeDecodeError:
-            return None, None
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
         lines = text.split("\r\n")
         if not lines:
-            return None, None
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
         request_line = lines[0]
         if request_line.startswith("CONNECT "):
-            return None, None
+            return None, None, b"HTTP/1.1 501 Not Implemented\r\n\r\n"
         parts = request_line.split(" ")
         if len(parts) < 2:
-            return None, None
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
         method, target = parts[0], parts[1]
         host = None
         port = 80
         if target.startswith("http://"):
             parsed = urlsplit(target)
             if not parsed.hostname:
-                return None, None
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
             host = parsed.hostname
             port = parsed.port or 80
             path = parsed.path or "/"
@@ -283,9 +290,9 @@ class EntryNode:
                         host = value
                     break
         if host is None:
-            return None, None
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
         rewritten = "\r\n".join(lines).encode("iso-8859-1")
-        return (host, port), rewritten
+        return (host, port), rewritten, None
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 将上行 payload 分片并发送
