@@ -61,6 +61,7 @@ python start_all.py
 - `ADAPTIVE_PATHS` / `ADAPTIVE_BEHAVIOR` / `ADAPTIVE_PROTO`：自适应消融开关
 - `SERVER_HOST` / `SERVER_PORT`：外部目标服务地址与端口
 - `SERVER_MODE`：目标服务模式（`echo` / `forward`）
+- `PROXY_MODE`：入口是否作为 HTTP 代理（仅支持明文 HTTP）
 - `SEED`：随机种子
 - `RUN_ID` / `OUT_DIR`：输出目录控制
 - `SESSION_COUNT` / `SESSION_DURATION`：客户端发送次数/时长
@@ -103,6 +104,25 @@ python -m nodes.client_app --url http://example.com/
 - 入口/中继/出口仍按多路径 + 行为伪装 + 属性伪装传输。
 - 真实流量模式下客户端会发送 HTTP 请求并读取响应。
 - HTTPS 场景目前未做 TLS 透传封装，如需 HTTPS 可在后续扩展为 SOCKS/CONNECT 或透明转发。
+
+## 入口作为 HTTP 代理（curl/浏览器）
+
+当需要让 curl 或浏览器直接使用入口节点作为 HTTP 代理时，启用 `PROXY_MODE=1`。
+
+示例（curl）：
+
+```bash
+export PROXY_MODE=1
+export SERVER_MODE=forward
+export EXTERNAL_SERVER=1
+python start_all.py
+curl -x http://127.0.0.1:9001 http://hcl.baidu.com/
+```
+
+说明：
+
+- 代理模式仅支持明文 HTTP，不支持 HTTPS CONNECT。
+- 入口会解析 Host 并自动将请求转发到目标站点，同时保持多路径与伪装策略。
 
 ## 实验输出目录与复现信息
 

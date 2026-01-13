@@ -40,6 +40,8 @@ class Config:
     server_port: int = 9301
     # 服务器模式：echo（本地回显）/ forward（转发外部真实服务）
     server_mode: str = "echo"
+    # 入口是否作为 HTTP 代理（仅支持明文 HTTP）
+    proxy_mode: bool = False
 
     # 窗口大小（秒）
     window_size_sec: int = 10
@@ -119,6 +121,7 @@ def load_config_from_env() -> Config:
     config.server_host = _env_str("SERVER_HOST", config.server_host)
     config.server_port = _env_int("SERVER_PORT", config.server_port)
     config.server_mode = _env_str("SERVER_MODE", config.server_mode)
+    config.proxy_mode = _env_bool("PROXY_MODE", config.proxy_mode)
     config.proto_switch_period = _env_int("PROTO_SWITCH_PERIOD", config.proto_switch_period)
     config.adaptive_paths = _env_bool("ADAPTIVE_PATHS", config.adaptive_paths)
     config.adaptive_behavior = _env_bool("ADAPTIVE_BEHAVIOR", config.adaptive_behavior)

@@ -97,6 +97,8 @@ class ExitNode:
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
         self._server_lock = asyncio.Lock()
+        self._server_conns: Dict[int, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
+        self._server_targets: Dict[int, tuple[str, int]] = {}
         self._window_task: asyncio.Task | None = None
         self.window_id = 0
         # 协议族/变体映射
@@ -107,14 +109,11 @@ class ExitNode:
             path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
 
-    async def connect_server(self) -> None:
+    async def connect_server(self, host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         # 连接目标服务
-        reader, writer = await asyncio.open_connection(
-            self.config.server_host, self.config.server_port
-        )
-        self.server_reader = reader
-        self.server_writer = writer
-        LOGGER.info("已连接到目标服务 %s:%s", self.config.server_host, self.config.server_port)
+        reader, writer = await asyncio.open_connection(host, port)
+        LOGGER.info("已连接到目标服务 %s:%s", host, port)
+        return reader, writer
 
     async def handle_middle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -167,24 +166,69 @@ class ExitNode:
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
         # 与上游服务串行交互，避免 readexactly 冲突
         async with self._server_lock:
-            if self.server_writer is None:
-                await self.connect_server()
-            assert self.server_writer and self.server_reader
-            # 连接上游 server 的读写需串行，避免并发 readexactly 冲突
-            self.server_writer.write(payload)
-            await self.server_writer.drain()
-            if self.config.server_mode == "echo":
-                response = await self.server_reader.readexactly(len(payload))
+            session_id = frame.session_id
+            target = self._server_targets.get(session_id, (self.config.server_host, self.config.server_port))
+            if session_id not in self._server_conns:
+                target, payload = self.extract_target(payload, target)
+                self._server_targets[session_id] = target
+                self._server_conns[session_id] = await self.connect_server(*target)
             else:
-                response = await self.read_response_stream()
+                payload = self.strip_target_prefix(payload)
+            reader, writer = self._server_conns[session_id]
+            # 连接上游 server 的读写需串行，避免并发 readexactly 冲突
+            try:
+                writer.write(payload)
+                await writer.drain()
+            except (ConnectionResetError, ConnectionAbortedError):
+                self._server_conns.pop(session_id, None)
+                reader, writer = await self.connect_server(*target)
+                self._server_conns[session_id] = (reader, writer)
+                writer.write(payload)
+                await writer.drain()
+            if self.config.server_mode == "echo":
+                response = await reader.readexactly(len(payload))
+            else:
+                response = await self.read_response_stream(reader)
         await self.send_downlink(frame, response)
 
-    async def read_response_stream(self) -> bytes:
+    def strip_target_prefix(self, payload: bytes) -> bytes:
+        if payload.startswith(b"TARGET "):
+            marker = payload.find(b"\n\n")
+            if marker != -1:
+                return payload[marker + 2 :]
+        return payload
+
+    def extract_target(
+        self, payload: bytes, default_target: tuple[str, int]
+    ) -> tuple[tuple[str, int], bytes]:
+        if not payload.startswith(b"TARGET "):
+            return default_target, payload
+        marker = payload.find(b"\n\n")
+        if marker == -1:
+            return default_target, payload
+        line = payload[:marker].decode("utf-8", errors="ignore")
+        rest = payload[marker + 2 :]
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            return default_target, rest
+        host_port = parts[1].strip()
+        if ":" in host_port:
+            host, port_text = host_port.rsplit(":", 1)
+            try:
+                port = int(port_text)
+            except ValueError:
+                port = default_target[1]
+        else:
+            host = host_port
+            port = default_target[1]
+        return (host, port), rest
+
+    async def read_response_stream(self, reader: asyncio.StreamReader) -> bytes:
         # 读取上游响应流，直到短时间无数据（适配真实 HTTP 响应）
         chunks = bytearray()
         while True:
             try:
-                data = await asyncio.wait_for(self.server_reader.read(4096), timeout=1.0)
+                data = await asyncio.wait_for(reader.read(4096), timeout=1.0)
             except asyncio.TimeoutError:
                 break
             if not data:

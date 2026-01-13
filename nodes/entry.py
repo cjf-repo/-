@@ -6,6 +6,7 @@ import json
 import random
 import struct
 import time
+from urllib.parse import urlsplit
 from dataclasses import replace
 from typing import Dict, List
 
@@ -194,6 +195,8 @@ class EntryNode:
         LOGGER.info("客户端已连接 %s", addr)
         path_conns = await self.connect_paths()
         await self.send_handshake(path_conns)
+        proxy_buffer = bytearray()
+        proxy_target_sent = False
         if self._window_task is None:
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id, self.family_by_path, self.variant_by_path)
@@ -209,7 +212,25 @@ class EntryNode:
                 data = await reader.read(2048)
                 if not data:
                     break
-                await self.send_chunk(data, path_conns)
+                if self.config.proxy_mode and not proxy_target_sent:
+                    proxy_buffer.extend(data)
+                    header_end = proxy_buffer.find(b"\r\n\r\n")
+                    if header_end == -1:
+                        continue
+                    header_end += 4
+                    header = bytes(proxy_buffer[:header_end])
+                    body = bytes(proxy_buffer[header_end:])
+                    proxy_buffer.clear()
+                    target, rewritten = self.parse_proxy_request(header)
+                    if target is None or rewritten is None:
+                        LOGGER.error("代理请求解析失败，关闭连接")
+                        break
+                    host, port = target
+                    prefix = f"TARGET {host}:{port}\n\n".encode("utf-8")
+                    await self.send_chunk(prefix + rewritten + body, path_conns)
+                    proxy_target_sent = True
+                else:
+                    await self.send_chunk(data, path_conns)
         except asyncio.IncompleteReadError:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
@@ -219,6 +240,52 @@ class EntryNode:
             for _, path_writer in path_conns:
                 path_writer.close()
                 await path_writer.wait_closed()
+
+    def parse_proxy_request(self, header: bytes) -> tuple[tuple[str, int] | None, bytes | None]:
+        try:
+            text = header.decode("iso-8859-1")
+        except UnicodeDecodeError:
+            return None, None
+        lines = text.split("\r\n")
+        if not lines:
+            return None, None
+        request_line = lines[0]
+        if request_line.startswith("CONNECT "):
+            return None, None
+        parts = request_line.split(" ")
+        if len(parts) < 2:
+            return None, None
+        method, target = parts[0], parts[1]
+        host = None
+        port = 80
+        if target.startswith("http://"):
+            parsed = urlsplit(target)
+            if not parsed.hostname:
+                return None, None
+            host = parsed.hostname
+            port = parsed.port or 80
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            lines[0] = f"{method} {path} HTTP/1.1"
+        else:
+            for line in lines[1:]:
+                if line.lower().startswith("host:"):
+                    value = line.split(":", 1)[1].strip()
+                    if ":" in value:
+                        host_part, port_part = value.rsplit(":", 1)
+                        host = host_part
+                        try:
+                            port = int(port_part)
+                        except ValueError:
+                            port = 80
+                    else:
+                        host = value
+                    break
+        if host is None:
+            return None, None
+        rewritten = "\r\n".join(lines).encode("iso-8859-1")
+        return (host, port), rewritten
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 将上行 payload 分片并发送
