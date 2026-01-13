@@ -197,6 +197,8 @@ class EntryNode:
         await self.send_handshake(path_conns)
         proxy_buffer = bytearray()
         proxy_target_sent = False
+        bytes_from_client = 0
+        bytes_to_client = [0]
         if self._window_task is None:
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id, self.family_by_path, self.variant_by_path)
@@ -205,13 +207,14 @@ class EntryNode:
         self._pending_down = {}
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
-            self.read_from_paths(path_conns, writer, fragment_buffer)
+            self.read_from_paths(path_conns, writer, fragment_buffer, bytes_to_client)
         )
         try:
             while True:
                 data = await reader.read(2048)
                 if not data:
                     break
+                bytes_from_client += len(data)
                 if self.config.proxy_mode and not proxy_target_sent:
                     proxy_buffer.extend(data)
                     header_end = proxy_buffer.find(b"\r\n\r\n")
@@ -245,6 +248,12 @@ class EntryNode:
             for _, path_writer in path_conns:
                 path_writer.close()
                 await path_writer.wait_closed()
+            LOGGER.info(
+                "代理连接关闭 %s，收到 %s 字节，返回 %s 字节",
+                addr,
+                bytes_from_client,
+                bytes_to_client[0],
+            )
 
     def parse_proxy_request(
         self, header: bytes
@@ -347,10 +356,14 @@ class EntryNode:
         path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
+        bytes_to_client: List[int],
     ) -> None:
         # 并发读取各路径下行数据
         readers = [reader for reader, _ in path_conns]
-        tasks = [asyncio.create_task(self.read_path(reader, client_writer, fragment_buffer)) for reader in readers]
+        tasks = [
+            asyncio.create_task(self.read_path(reader, client_writer, fragment_buffer, bytes_to_client))
+            for reader in readers
+        ]
         await asyncio.gather(*tasks)
 
     async def read_path(
@@ -358,6 +371,7 @@ class EntryNode:
         reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
+        bytes_to_client: List[int],
     ) -> None:
         # 单路径读取并处理下行帧
         while True:
@@ -377,18 +391,19 @@ class EntryNode:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                await self.enqueue_downlink(frame.seq, payload, client_writer)
+                await self.enqueue_downlink(frame.seq, payload, client_writer, bytes_to_client)
             else:
                 # 完整 payload 直接入队
                 if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
-                await self.enqueue_downlink(frame.seq, frame.payload, client_writer)
+                await self.enqueue_downlink(frame.seq, frame.payload, client_writer, bytes_to_client)
 
     async def enqueue_downlink(
         self,
         seq: int,
         payload: bytes,
         client_writer: asyncio.StreamWriter,
+        bytes_to_client: List[int],
     ) -> None:
         # 按 seq 重排，确保回程数据按顺序交付给 client
         self._pending_down[seq] = payload
@@ -396,6 +411,9 @@ class EntryNode:
             data = self._pending_down.pop(self._next_down_seq)
             client_writer.write(data)
             await client_writer.drain()
+            # 统计回传字节
+            if self.config.proxy_mode:
+                bytes_to_client[0] += len(data)
             self._next_down_seq += 1
 
 

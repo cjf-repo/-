@@ -189,6 +189,13 @@ class ExitNode:
                 response = await reader.readexactly(len(payload))
             else:
                 response = await self.read_response_stream(reader)
+        LOGGER.info(
+            "上游请求 %s:%s 发送 %s 字节，收到 %s 字节",
+            target[0],
+            target[1],
+            len(payload),
+            len(response),
+        )
         await self.send_downlink(frame, response)
 
     def strip_target_prefix(self, payload: bytes) -> bytes:
