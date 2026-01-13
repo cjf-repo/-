@@ -222,6 +222,8 @@ class EntryNode:
         )
         try:
             while True:
+                if close_after_response[0]:
+                    break
                 data = await reader.read(2048)
                 if not data:
                     break

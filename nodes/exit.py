@@ -199,6 +199,17 @@ class ExitNode:
         if self.config.proxy_mode and self.config.server_mode == "forward":
             response = f"RESP_LEN {len(response)}\n\n".encode("utf-8") + response
         await self.send_downlink(frame, response)
+        if self.config.proxy_mode and self.config.server_mode == "forward":
+            self.close_proxy_session(frame.session_id)
+
+    def close_proxy_session(self, session_id: int) -> None:
+        # 代理模式下结束会话：关闭与上游和中继的连接
+        conn = self._server_conns.pop(session_id, None)
+        if conn:
+            reader, writer = conn
+            writer.close()
+        for writer in self.path_writers.values():
+            writer.close()
 
     def strip_target_prefix(self, payload: bytes) -> bytes:
         if payload.startswith(b"TARGET "):
