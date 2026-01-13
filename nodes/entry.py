@@ -216,6 +216,7 @@ class EntryNode:
         await self.send_handshake(path_conns)
         proxy_buffer = bytearray()
         proxy_target_sent = False
+        tunnel_mode = False
         bytes_from_client = 0
         bytes_to_client = [0]
         close_after_response = [False]
@@ -265,7 +266,7 @@ class EntryNode:
                     header = bytes(proxy_buffer[:header_end])
                     body = bytes(proxy_buffer[header_end:])
                     proxy_buffer.clear()
-                    target, rewritten, error_response = self.parse_proxy_request(header)
+                    target, rewritten, error_response, is_connect = self.parse_proxy_request(header)
                     if error_response is not None:
                         writer.write(error_response)
                         await writer.drain()
@@ -276,10 +277,19 @@ class EntryNode:
                         break
                     host, port = target
                     prefix = f"TARGET {host}:{port}\n\n".encode("utf-8")
-                    await self.send_chunk(prefix + rewritten + body, path_conns)
+                    if is_connect:
+                        await self.send_chunk(prefix, path_conns)
+                        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        await writer.drain()
+                        tunnel_mode = True
+                    else:
+                        await self.send_chunk(prefix + rewritten + body, path_conns)
                     proxy_target_sent = True
                 else:
-                    await self.send_chunk(data, path_conns)
+                    if tunnel_mode:
+                        await self.send_chunk(data, path_conns)
+                    else:
+                        await self.send_chunk(data, path_conns)
         except asyncio.IncompleteReadError:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
@@ -299,27 +309,35 @@ class EntryNode:
 
     def parse_proxy_request(
         self, header: bytes
-    ) -> tuple[tuple[str, int] | None, bytes | None, bytes | None]:
+    ) -> tuple[tuple[str, int] | None, bytes | None, bytes | None, bool]:
         try:
             text = header.decode("iso-8859-1")
         except UnicodeDecodeError:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         lines = text.split("\r\n")
         if not lines:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         request_line = lines[0]
-        if request_line.startswith("CONNECT "):
-            return None, None, b"HTTP/1.1 501 Not Implemented\r\n\r\n"
         parts = request_line.split(" ")
         if len(parts) < 2:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         method, target = parts[0], parts[1]
         host = None
         port = 80
+        is_connect = method.upper() == "CONNECT"
+        if is_connect:
+            if ":" not in target:
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
+            host, port_text = target.rsplit(":", 1)
+            try:
+                port = int(port_text)
+            except ValueError:
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
+            return (host, port), b"", None, True
         if target.startswith("http://"):
             parsed = urlsplit(target)
             if not parsed.hostname:
-                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
             host = parsed.hostname
             port = parsed.port or 80
             path = parsed.path or "/"
@@ -341,9 +359,9 @@ class EntryNode:
                         host = value
                     break
         if host is None:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         rewritten = "\r\n".join(lines).encode("iso-8859-1")
-        return (host, port), rewritten, None
+        return (host, port), rewritten, None, False
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 将上行 payload 分片并发送
