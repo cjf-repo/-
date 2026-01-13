@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="320" viewBox="0 0 1100 320">
+  <style>
+    .node { fill: #e8f0fe; stroke: #333; stroke-width: 1.5; }
+    .label { font: 14px sans-serif; fill: #111; }
+    .arrow { stroke: #111; stroke-width: 2; marker-end: url(#arrowhead); }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#111" />
+    </marker>
+  </defs>
+
+  <rect class="node" x="60" y="140" rx="8" ry="8" width="120" height="50" />
+  <text class="label" x="70" y="170">ClientApp</text>
+
+  <rect class="node" x="240" y="140" rx="8" ry="8" width="120" height="50" />
+  <text class="label" x="270" y="170">Entry</text>
+
+  <rect class="node" x="420" y="80" rx="8" ry="8" width="120" height="50" />
+  <text class="label" x="438" y="110">Middle_0</text>
+
+  <rect class="node" x="420" y="200" rx="8" ry="8" width="120" height="50" />
+  <text class="label" x="438" y="230">Middle_1</text>
+
+  <rect class="node" x="600" y="140" rx="8" ry="8" width="120" height="50" />
+  <text class="label" x="635" y="170">Exit</text>
+
+  <rect class="node" x="780" y="140" rx="8" ry="8" width="120" height="50" />
+  <text class="label" x="815" y="170">Server</text>
+
+  <line class="arrow" x1="180" y1="165" x2="240" y2="165" />
+  <line class="arrow" x1="360" y1="165" x2="420" y2="105" />
+  <line class="arrow" x1="360" y1="165" x2="420" y2="225" />
+  <line class="arrow" x1="540" y1="105" x2="600" y2="165" />
+  <line class="arrow" x1="540" y1="225" x2="600" y2="165" />
+  <line class="arrow" x1="720" y1="165" x2="780" y2="165" />
+
+  <text class="label" x="450" y="30">多路径并行</text>
+  <text class="label" x="450" y="300">回程方向反向</text>
+</svg>
