@@ -102,6 +102,9 @@ class EntryNode:
         self._window_task: asyncio.Task | None = None
         self._next_down_seq = 0
         self._pending_down: Dict[int, bytes] = {}
+        self._pending_down_ts: Dict[int, float] = {}
+        self._next_down_wait_ts: float | None = None
+        self._downlink_state: dict | None = None
         # 协议族/变体映射
         self.family_by_path: Dict[int, int] = {
             path_id: 1 for path_id in range(len(self.active_middle_ports))
@@ -171,6 +174,19 @@ class EntryNode:
                 }
                 self.run_context.write_window_log(log_entry)
                 LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
+            downlink_state = self._downlink_state
+            if downlink_state is not None:
+                self._handle_missing_downlink(
+                    downlink_state["client_writer"],
+                    downlink_state["close_after_response"],
+                )
+                await self._deliver_pending_downlink(
+                    downlink_state["client_writer"],
+                    downlink_state["bytes_to_client"],
+                    downlink_state["close_after_response"],
+                    downlink_state["expected_response_len"],
+                    downlink_state["delivered_response_len"],
+                )
             self.timeout_events = 0
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
@@ -208,6 +224,15 @@ class EntryNode:
             self._window_task = asyncio.create_task(self.start_window_loop())
         self._next_down_seq = 0
         self._pending_down = {}
+        self._pending_down_ts = {}
+        self._next_down_wait_ts = None
+        self._downlink_state = {
+            "client_writer": writer,
+            "bytes_to_client": bytes_to_client,
+            "close_after_response": close_after_response,
+            "expected_response_len": expected_response_len,
+            "delivered_response_len": delivered_response_len,
+        }
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(
@@ -258,6 +283,7 @@ class EntryNode:
             downlink_task.cancel()
             writer.close()
             await writer.wait_closed()
+            self._downlink_state = None
             for _, path_writer in path_conns:
                 path_writer.close()
                 await path_writer.wait_closed()
@@ -364,6 +390,81 @@ class EntryNode:
                     writer.write(padding.encode())
                     await writer.drain()
 
+    def _reset_missing_timer(self) -> None:
+        candidates = [
+            ts for seq, ts in self._pending_down_ts.items() if seq > self._next_down_seq
+        ]
+        self._next_down_wait_ts = min(candidates) if candidates else None
+
+    def _close_client_once(
+        self,
+        client_writer: asyncio.StreamWriter,
+        close_after_response: List[bool],
+    ) -> None:
+        if close_after_response[0]:
+            return
+        close_after_response[0] = True
+        if not client_writer.is_closing():
+            client_writer.close()
+
+    def _handle_missing_downlink(
+        self,
+        client_writer: asyncio.StreamWriter,
+        close_after_response: List[bool],
+    ) -> None:
+        now = time.time()
+        while (
+            self._next_down_seq not in self._pending_down
+            and self._next_down_wait_ts is not None
+            and now - self._next_down_wait_ts > self.config.ack_timeout_sec
+        ):
+            missing_seq = self._next_down_seq
+            LOGGER.warning("下行 seq %s 超时未到达，跳过", missing_seq)
+            if self.config.proxy_mode:
+                LOGGER.warning("代理模式下关闭客户端连接并清空下行缓存")
+                self._close_client_once(client_writer, close_after_response)
+                self._pending_down.clear()
+                self._pending_down_ts.clear()
+                self._next_down_wait_ts = None
+                return
+            self._next_down_seq += 1
+            self._reset_missing_timer()
+
+    async def _deliver_pending_downlink(
+        self,
+        client_writer: asyncio.StreamWriter,
+        bytes_to_client: List[int],
+        close_after_response: List[bool],
+        expected_response_len: List[int | None],
+        delivered_response_len: List[int],
+    ) -> None:
+        while self._next_down_seq in self._pending_down:
+            data = self._pending_down.pop(self._next_down_seq)
+            self._pending_down_ts.pop(self._next_down_seq, None)
+            if self.config.proxy_mode and expected_response_len[0] is None:
+                marker = data.find(b"\n\n")
+                if data.startswith(b"RESP_LEN ") and marker != -1:
+                    header = data[:marker].decode("utf-8", errors="ignore")
+                    _, value = header.split(" ", 1)
+                    try:
+                        expected_response_len[0] = int(value.strip())
+                    except ValueError:
+                        expected_response_len[0] = None
+                    data = data[marker + 2 :]
+            client_writer.write(data)
+            await client_writer.drain()
+            if self.config.proxy_mode:
+                bytes_to_client[0] += len(data)
+                delivered_response_len[0] += len(data)
+                if (
+                    expected_response_len[0] is not None
+                    and delivered_response_len[0] >= expected_response_len[0]
+                    and not close_after_response[0]
+                ):
+                    self._close_client_once(client_writer, close_after_response)
+            self._next_down_seq += 1
+        self._reset_missing_timer()
+
     async def read_from_paths(
         self,
         path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
@@ -454,33 +555,19 @@ class EntryNode:
         delivered_response_len: List[int],
     ) -> None:
         # 按 seq 重排，确保回程数据按顺序交付给 client
+        if seq not in self._pending_down_ts:
+            self._pending_down_ts[seq] = time.time()
         self._pending_down[seq] = payload
-        while self._next_down_seq in self._pending_down:
-            data = self._pending_down.pop(self._next_down_seq)
-            if self.config.proxy_mode and expected_response_len[0] is None:
-                marker = data.find(b"\n\n")
-                if data.startswith(b"RESP_LEN ") and marker != -1:
-                    header = data[:marker].decode("utf-8", errors="ignore")
-                    _, value = header.split(" ", 1)
-                    try:
-                        expected_response_len[0] = int(value.strip())
-                    except ValueError:
-                        expected_response_len[0] = None
-                    data = data[marker + 2 :]
-            client_writer.write(data)
-            await client_writer.drain()
-            # 统计回传字节
-            if self.config.proxy_mode:
-                bytes_to_client[0] += len(data)
-                delivered_response_len[0] += len(data)
-                if (
-                    expected_response_len[0] is not None
-                    and delivered_response_len[0] >= expected_response_len[0]
-                    and not close_after_response[0]
-                ):
-                    close_after_response[0] = True
-                    client_writer.close()
-            self._next_down_seq += 1
+        if seq > self._next_down_seq and self._next_down_wait_ts is None:
+            self._next_down_wait_ts = self._pending_down_ts[seq]
+        self._handle_missing_downlink(client_writer, close_after_response)
+        await self._deliver_pending_downlink(
+            client_writer,
+            bytes_to_client,
+            close_after_response,
+            expected_response_len,
+            delivered_response_len,
+        )
 
 
 async def main() -> None:
