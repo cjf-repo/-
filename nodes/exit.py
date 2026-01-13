@@ -173,8 +173,24 @@ class ExitNode:
             # 连接上游 server 的读写需串行，避免并发 readexactly 冲突
             self.server_writer.write(payload)
             await self.server_writer.drain()
-            response = await self.server_reader.readexactly(len(payload))
+            if self.config.server_mode == "echo":
+                response = await self.server_reader.readexactly(len(payload))
+            else:
+                response = await self.read_response_stream()
         await self.send_downlink(frame, response)
+
+    async def read_response_stream(self) -> bytes:
+        # 读取上游响应流，直到短时间无数据（适配真实 HTTP 响应）
+        chunks = bytearray()
+        while True:
+            try:
+                data = await asyncio.wait_for(self.server_reader.read(4096), timeout=1.0)
+            except asyncio.TimeoutError:
+                break
+            if not data:
+                break
+            chunks.extend(data)
+        return bytes(chunks)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
         # 下行分片并发送

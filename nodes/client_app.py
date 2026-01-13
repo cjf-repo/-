@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import time
+from urllib.parse import urlparse
 
 from config import DEFAULT_CONFIG
 from logger import setup_logger
@@ -24,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--count", type=int, default=0)
     parser.add_argument("--duration", type=float, default=20.0)
+    parser.add_argument("--url", default="", help="指定 HTTP URL（例如 http://example.com/）")
     return parser.parse_args()
 
 
@@ -48,40 +50,87 @@ async def main() -> None:
             break
         if args.count == 0 and args.duration > 0 and time.monotonic() - start_ts >= args.duration:
             break
-        # 生成随机 payload
-        payload = os.urandom(args.size)
-        sent += 1
-        LOGGER.info("发送第 %s 条（%s 字节）", sent, len(payload))
-        # 发送并记录延迟
-        send_ts = time.monotonic()
-        writer.write(payload)
-        await writer.drain()
-        response = await reader.readexactly(len(payload))
-        recv_ts = time.monotonic()
-        latency_ms = (recv_ts - send_ts) * 1000
-        if response == payload:
-            LOGGER.info("回显校验通过（第 %s 条）", sent)
-            # 成功日志
+        # 若提供 URL，则发送 HTTP 请求并读取响应（真实流量）
+        if args.url:
+            parsed = urlparse(args.url)
+            host = parsed.hostname
+            if not host:
+                LOGGER.error("URL 解析失败：%s", args.url)
+                break
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                "User-Agent: multipath-proxy/1.0\r\n"
+                "Accept: */*\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            ).encode("utf-8")
+            sent += 1
+            LOGGER.info("请求第 %s 条：%s", sent, args.url)
+            send_ts = time.monotonic()
+            writer.write(request)
+            await writer.drain()
+            response = bytearray()
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+                except asyncio.TimeoutError:
+                    break
+                if not chunk:
+                    break
+                response.extend(chunk)
+            recv_ts = time.monotonic()
+            latency_ms = (recv_ts - send_ts) * 1000
+            ok = bool(response)
+            LOGGER.info("收到响应 %s 字节（第 %s 条）", len(response), sent)
             run_context.write_latency_log(
                 {
                     "seq": sent,
-                    "ok": True,
+                    "ok": ok,
                     "latency_ms": latency_ms,
-                    "payload_len": len(payload),
+                    "payload_len": len(request),
+                    "response_len": len(response),
+                    "url": args.url,
                 }
             )
         else:
-            LOGGER.error("回显校验失败（第 %s 条）", sent)
-            # 失败日志
-            run_context.write_latency_log(
-                {
-                    "seq": sent,
-                    "ok": False,
-                    "latency_ms": latency_ms,
-                    "payload_len": len(payload),
-                }
-            )
-            break
+            # 生成随机 payload
+            payload = os.urandom(args.size)
+            sent += 1
+            LOGGER.info("发送第 %s 条（%s 字节）", sent, len(payload))
+            # 发送并记录延迟
+            send_ts = time.monotonic()
+            writer.write(payload)
+            await writer.drain()
+            response = await reader.readexactly(len(payload))
+            recv_ts = time.monotonic()
+            latency_ms = (recv_ts - send_ts) * 1000
+            if response == payload:
+                LOGGER.info("回显校验通过（第 %s 条）", sent)
+                # 成功日志
+                run_context.write_latency_log(
+                    {
+                        "seq": sent,
+                        "ok": True,
+                        "latency_ms": latency_ms,
+                        "payload_len": len(payload),
+                    }
+                )
+            else:
+                LOGGER.error("回显校验失败（第 %s 条）", sent)
+                # 失败日志
+                run_context.write_latency_log(
+                    {
+                        "seq": sent,
+                        "ok": False,
+                        "latency_ms": latency_ms,
+                        "payload_len": len(payload),
+                    }
+                )
+                break
         # 控制发送间隔
         await asyncio.sleep(args.interval)
     # 关闭连接

@@ -18,9 +18,10 @@ async def run() -> None:
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
-    # 启动目标服务
-    processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.server", env=base_env))
-    await asyncio.sleep(0.2)
+    # 启动目标服务（外部真实服务模式可跳过）
+    if os.environ.get("EXTERNAL_SERVER") != "1":
+        processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.server", env=base_env))
+        await asyncio.sleep(0.2)
     # 启动出口节点
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.exit", env=base_env))
     await asyncio.sleep(0.2)

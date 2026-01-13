@@ -59,6 +59,8 @@ python start_all.py
 - `MODE`：运行模式（`normal` / `baseline_delay` / `baseline_padding`）
 - `PROTO_SWITCH_PERIOD`：协议族切换周期（窗口数）
 - `ADAPTIVE_PATHS` / `ADAPTIVE_BEHAVIOR` / `ADAPTIVE_PROTO`：自适应消融开关
+- `SERVER_HOST` / `SERVER_PORT`：外部目标服务地址与端口
+- `SERVER_MODE`：目标服务模式（`echo` / `forward`）
 - `SEED`：随机种子
 - `RUN_ID` / `OUT_DIR`：输出目录控制
 - `SESSION_COUNT` / `SESSION_DURATION`：客户端发送次数/时长
@@ -70,6 +72,37 @@ PATH_COUNT=2 OBFUSCATION_LEVEL=2 ALPHA_PADDING=0.05 \
 ADAPTIVE_PATHS=1 ADAPTIVE_BEHAVIOR=0 ADAPTIVE_PROTO=1 \
 PROTO_SWITCH_PERIOD=3 python start_all.py
 ```
+
+## 真实流量（访问指定网站）
+
+默认情况下系统使用本地回显服务（`SERVER_MODE=echo`）。如需访问真实网站，请按以下步骤：
+
+1) 选择目标网站（HTTP 示例）
+
+```bash
+export SERVER_MODE=forward
+export SERVER_HOST=example.com
+export SERVER_PORT=80
+export EXTERNAL_SERVER=1
+```
+
+2) 启动全链路（跳过本地回显服务）
+
+```bash
+python start_all.py
+```
+
+3) 发起真实 HTTP 请求
+
+```bash
+python -m nodes.client_app --url http://example.com/
+```
+
+说明：
+
+- 入口/中继/出口仍按多路径 + 行为伪装 + 属性伪装传输。
+- 真实流量模式下客户端会发送 HTTP 请求并读取响应。
+- HTTPS 场景目前未做 TLS 透传封装，如需 HTTPS 可在后续扩展为 SOCKS/CONNECT 或透明转发。
 
 ## 实验输出目录与复现信息
 
