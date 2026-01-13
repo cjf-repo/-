@@ -276,7 +276,8 @@ class EntryNode:
                         LOGGER.error("代理请求解析失败，关闭连接")
                         break
                     host, port = target
-                    prefix = f"TARGET {host}:{port}\n\n".encode("utf-8")
+                    prefix_suffix = " TUNNEL" if is_connect else ""
+                    prefix = f"TARGET {host}:{port}{prefix_suffix}\n\n".encode("utf-8")
                     if is_connect:
                         await self.send_chunk(prefix, path_conns)
                         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
