@@ -142,11 +142,13 @@ class ExitNode:
                     await self.send_ack(frame)
         except asyncio.IncompleteReadError:
             LOGGER.info("中继节点已断开 %s", addr)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+            LOGGER.info("中继连接异常断开 %s: %s", addr, exc)
 
     async def send_ack(self, frame: Frame) -> None:
         # 回发 ACK
         writer = self.path_writers.get(frame.path_id)
-        if not writer:
+        if not writer or writer.is_closing():
             return
         ack_frame = Frame(
             session_id=frame.session_id,
@@ -160,8 +162,12 @@ class ExitNode:
             frag_total=1,
             payload=ACK_STRUCT.pack(frame.seq),
         )
-        writer.write(ack_frame.encode())
-        await writer.drain()
+        try:
+            writer.write(ack_frame.encode())
+            await writer.drain()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+            LOGGER.info("ACK 发送失败 path %s: %s", frame.path_id, exc)
+            self.path_writers.pop(frame.path_id, None)
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
         # 与上游服务串行交互，避免 readexactly 冲突
@@ -300,12 +306,22 @@ class ExitNode:
             if self.behavior.params_by_path[path_id].enable_jitter:
                 await asyncio.sleep(jitter_ms / 1000 * random.random())
             writer.write(out_frame.encode())
-            await writer.drain()
+            try:
+                await writer.drain()
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+                LOGGER.info("下行发送失败 path %s: %s", path_id, exc)
+                self.path_writers.pop(path_id, None)
+                continue
             if self.behavior.update_burst(path_id):
                 template = out_frame
                 for padding in self.behavior.make_padding_frames(template):
                     writer.write(padding.encode())
-                    await writer.drain()
+                    try:
+                        await writer.drain()
+                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+                        LOGGER.info("填充发送失败 path %s: %s", path_id, exc)
+                        self.path_writers.pop(path_id, None)
+                        break
 
     async def start_window_loop(self) -> None:
         # 周期性窗口循环：策略更新与日志输出
