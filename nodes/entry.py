@@ -112,6 +112,7 @@ class EntryNode:
         self.variant_by_path: Dict[int, int] = {
             path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
+        self._tunnel_mode = False
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         # 连接所有中继路径
@@ -228,15 +229,7 @@ class EntryNode:
             self._window_task = asyncio.create_task(self.start_window_loop())
         self._next_down_seq = 0
         self._pending_down = {}
-        self._pending_down_ts = {}
-        self._next_down_wait_ts = None
-        self._downlink_state = {
-            "client_writer": writer,
-            "bytes_to_client": bytes_to_client,
-            "close_after_response": close_after_response,
-            "expected_response_len": expected_response_len,
-            "delivered_response_len": delivered_response_len,
-        }
+        self._tunnel_mode = False
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(
@@ -283,6 +276,7 @@ class EntryNode:
                         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         await writer.drain()
                         tunnel_mode = True
+                        self._tunnel_mode = True
                     else:
                         await self.send_chunk(prefix + rewritten + body, path_conns)
                     proxy_target_sent = True
@@ -562,28 +556,42 @@ class EntryNode:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                await self.enqueue_downlink(
-                    frame.seq,
-                    payload,
-                    client_writer,
-                    bytes_to_client,
-                    close_after_response,
-                    expected_response_len,
-                    delivered_response_len,
-                )
+                if self._tunnel_mode:
+                    await self.forward_tunnel_downlink(
+                        payload,
+                        client_writer,
+                        bytes_to_client,
+                    )
+                else:
+                    await self.enqueue_downlink(
+                        frame.seq,
+                        payload,
+                        client_writer,
+                        bytes_to_client,
+                        close_after_response,
+                        expected_response_len,
+                        delivered_response_len,
+                    )
             else:
                 # 完整 payload 直接入队
                 if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
-                await self.enqueue_downlink(
-                    frame.seq,
-                    frame.payload,
-                    client_writer,
-                    bytes_to_client,
-                    close_after_response,
-                    expected_response_len,
-                    delivered_response_len,
-                )
+                if self._tunnel_mode:
+                    await self.forward_tunnel_downlink(
+                        frame.payload,
+                        client_writer,
+                        bytes_to_client,
+                    )
+                else:
+                    await self.enqueue_downlink(
+                        frame.seq,
+                        frame.payload,
+                        client_writer,
+                        bytes_to_client,
+                        close_after_response,
+                        expected_response_len,
+                        delivered_response_len,
+                    )
 
     async def enqueue_downlink(
         self,
@@ -609,6 +617,17 @@ class EntryNode:
             expected_response_len,
             delivered_response_len,
         )
+
+    async def forward_tunnel_downlink(
+        self,
+        payload: bytes,
+        client_writer: asyncio.StreamWriter,
+        bytes_to_client: List[int],
+    ) -> None:
+        client_writer.write(payload)
+        await client_writer.drain()
+        if self.config.proxy_mode:
+            bytes_to_client[0] += len(payload)
 
 
 async def main() -> None:
