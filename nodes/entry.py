@@ -109,6 +109,7 @@ class EntryNode:
         self.variant_by_path: Dict[int, int] = {
             path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
+        self._tunnel_mode = False
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         # 连接所有中继路径
@@ -193,10 +194,14 @@ class EntryNode:
         # 处理客户端连接
         addr = writer.get_extra_info("peername")
         LOGGER.info("客户端已连接 %s", addr)
+        self.session_id = random.randint(1, 2**32 - 1)
+        self.seq_counter = 0
+        self.scheduler.reset_stats()
         path_conns = await self.connect_paths()
         await self.send_handshake(path_conns)
         proxy_buffer = bytearray()
         proxy_target_sent = False
+        tunnel_mode = False
         bytes_from_client = 0
         bytes_to_client = [0]
         close_after_response = [False]
@@ -208,6 +213,7 @@ class EntryNode:
             self._window_task = asyncio.create_task(self.start_window_loop())
         self._next_down_seq = 0
         self._pending_down = {}
+        self._tunnel_mode = False
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(
@@ -237,7 +243,7 @@ class EntryNode:
                     header = bytes(proxy_buffer[:header_end])
                     body = bytes(proxy_buffer[header_end:])
                     proxy_buffer.clear()
-                    target, rewritten, error_response = self.parse_proxy_request(header)
+                    target, rewritten, error_response, is_connect = self.parse_proxy_request(header)
                     if error_response is not None:
                         writer.write(error_response)
                         await writer.drain()
@@ -247,11 +253,22 @@ class EntryNode:
                         LOGGER.error("代理请求解析失败，关闭连接")
                         break
                     host, port = target
-                    prefix = f"TARGET {host}:{port}\n\n".encode("utf-8")
-                    await self.send_chunk(prefix + rewritten + body, path_conns)
+                    prefix_suffix = " TUNNEL" if is_connect else ""
+                    prefix = f"TARGET {host}:{port}{prefix_suffix}\n\n".encode("utf-8")
+                    if is_connect:
+                        await self.send_chunk(prefix, path_conns)
+                        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        await writer.drain()
+                        tunnel_mode = True
+                        self._tunnel_mode = True
+                    else:
+                        await self.send_chunk(prefix + rewritten + body, path_conns)
                     proxy_target_sent = True
                 else:
-                    await self.send_chunk(data, path_conns)
+                    if tunnel_mode:
+                        await self.send_chunk(data, path_conns)
+                    else:
+                        await self.send_chunk(data, path_conns)
         except asyncio.IncompleteReadError:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
@@ -270,27 +287,35 @@ class EntryNode:
 
     def parse_proxy_request(
         self, header: bytes
-    ) -> tuple[tuple[str, int] | None, bytes | None, bytes | None]:
+    ) -> tuple[tuple[str, int] | None, bytes | None, bytes | None, bool]:
         try:
             text = header.decode("iso-8859-1")
         except UnicodeDecodeError:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         lines = text.split("\r\n")
         if not lines:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         request_line = lines[0]
-        if request_line.startswith("CONNECT "):
-            return None, None, b"HTTP/1.1 501 Not Implemented\r\n\r\n"
         parts = request_line.split(" ")
         if len(parts) < 2:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         method, target = parts[0], parts[1]
         host = None
         port = 80
+        is_connect = method.upper() == "CONNECT"
+        if is_connect:
+            if ":" not in target:
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
+            host, port_text = target.rsplit(":", 1)
+            try:
+                port = int(port_text)
+            except ValueError:
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
+            return (host, port), b"", None, True
         if target.startswith("http://"):
             parsed = urlsplit(target)
             if not parsed.hostname:
-                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+                return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
             host = parsed.hostname
             port = parsed.port or 80
             path = parsed.path or "/"
@@ -312,9 +337,9 @@ class EntryNode:
                         host = value
                     break
         if host is None:
-            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n"
+            return None, None, b"HTTP/1.1 400 Bad Request\r\n\r\n", False
         rewritten = "\r\n".join(lines).encode("iso-8859-1")
-        return (host, port), rewritten, None
+        return (host, port), rewritten, None, False
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 将上行 payload 分片并发送
@@ -420,28 +445,42 @@ class EntryNode:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                await self.enqueue_downlink(
-                    frame.seq,
-                    payload,
-                    client_writer,
-                    bytes_to_client,
-                    close_after_response,
-                    expected_response_len,
-                    delivered_response_len,
-                )
+                if self._tunnel_mode:
+                    await self.forward_tunnel_downlink(
+                        payload,
+                        client_writer,
+                        bytes_to_client,
+                    )
+                else:
+                    await self.enqueue_downlink(
+                        frame.seq,
+                        payload,
+                        client_writer,
+                        bytes_to_client,
+                        close_after_response,
+                        expected_response_len,
+                        delivered_response_len,
+                    )
             else:
                 # 完整 payload 直接入队
                 if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
                     frame = self.proto.decode_payload(frame)
-                await self.enqueue_downlink(
-                    frame.seq,
-                    frame.payload,
-                    client_writer,
-                    bytes_to_client,
-                    close_after_response,
-                    expected_response_len,
-                    delivered_response_len,
-                )
+                if self._tunnel_mode:
+                    await self.forward_tunnel_downlink(
+                        frame.payload,
+                        client_writer,
+                        bytes_to_client,
+                    )
+                else:
+                    await self.enqueue_downlink(
+                        frame.seq,
+                        frame.payload,
+                        client_writer,
+                        bytes_to_client,
+                        close_after_response,
+                        expected_response_len,
+                        delivered_response_len,
+                    )
 
     async def enqueue_downlink(
         self,
@@ -481,6 +520,17 @@ class EntryNode:
                     close_after_response[0] = True
                     client_writer.close()
             self._next_down_seq += 1
+
+    async def forward_tunnel_downlink(
+        self,
+        payload: bytes,
+        client_writer: asyncio.StreamWriter,
+        bytes_to_client: List[int],
+    ) -> None:
+        client_writer.write(payload)
+        await client_writer.drain()
+        if self.config.proxy_mode:
+            bytes_to_client[0] += len(payload)
 
 
 async def main() -> None:

@@ -99,6 +99,7 @@ class ExitNode:
         self._server_lock = asyncio.Lock()
         self._server_conns: Dict[int, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._server_targets: Dict[int, tuple[str, int]] = {}
+        self._server_tunnels: Dict[int, bool] = {}
         self._window_task: asyncio.Task | None = None
         self.window_id = 0
         # 协议族/变体映射
@@ -142,11 +143,13 @@ class ExitNode:
                     await self.send_ack(frame)
         except asyncio.IncompleteReadError:
             LOGGER.info("中继节点已断开 %s", addr)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+            LOGGER.info("中继连接异常断开 %s: %s", addr, exc)
 
     async def send_ack(self, frame: Frame) -> None:
         # 回发 ACK
         writer = self.path_writers.get(frame.path_id)
-        if not writer:
+        if not writer or writer.is_closing():
             return
         ack_frame = Frame(
             session_id=frame.session_id,
@@ -160,22 +163,30 @@ class ExitNode:
             frag_total=1,
             payload=ACK_STRUCT.pack(frame.seq),
         )
-        writer.write(ack_frame.encode())
-        await writer.drain()
+        try:
+            writer.write(ack_frame.encode())
+            await writer.drain()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+            LOGGER.info("ACK 发送失败 path %s: %s", frame.path_id, exc)
+            self.path_writers.pop(frame.path_id, None)
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
         # 与上游服务串行交互，避免 readexactly 冲突
         async with self._server_lock:
             session_id = frame.session_id
             target = self._server_targets.get(session_id, (self.config.server_host, self.config.server_port))
+            tunnel_mode = self._server_tunnels.get(session_id, False)
             if session_id not in self._server_conns:
-                target, payload = self.extract_target(payload, target)
+                target, payload, tunnel_mode = self.extract_target(payload, target)
                 self._server_targets[session_id] = target
+                self._server_tunnels[session_id] = tunnel_mode
                 self._server_conns[session_id] = await self.connect_server(*target)
             else:
                 payload = self.strip_target_prefix(payload)
             reader, writer = self._server_conns[session_id]
             # 连接上游 server 的读写需串行，避免并发 readexactly 冲突
+            if tunnel_mode and not payload:
+                return
             try:
                 writer.write(payload)
                 await writer.drain()
@@ -196,10 +207,10 @@ class ExitNode:
             len(payload),
             len(response),
         )
-        if self.config.proxy_mode and self.config.server_mode == "forward":
+        if self.config.proxy_mode and self.config.server_mode == "forward" and not tunnel_mode:
             response = f"RESP_LEN {len(response)}\n\n".encode("utf-8") + response
         await self.send_downlink(frame, response)
-        if self.config.proxy_mode and self.config.server_mode == "forward":
+        if self.config.proxy_mode and self.config.server_mode == "forward" and not tunnel_mode:
             self.close_proxy_session(frame.session_id)
 
     def close_proxy_session(self, session_id: int) -> None:
@@ -220,18 +231,19 @@ class ExitNode:
 
     def extract_target(
         self, payload: bytes, default_target: tuple[str, int]
-    ) -> tuple[tuple[str, int], bytes]:
+    ) -> tuple[tuple[str, int], bytes, bool]:
         if not payload.startswith(b"TARGET "):
-            return default_target, payload
+            return default_target, payload, False
         marker = payload.find(b"\n\n")
         if marker == -1:
-            return default_target, payload
+            return default_target, payload, False
         line = payload[:marker].decode("utf-8", errors="ignore")
         rest = payload[marker + 2 :]
-        parts = line.split(" ", 1)
-        if len(parts) != 2:
-            return default_target, rest
+        parts = line.split(" ", 2)
+        if len(parts) < 2:
+            return default_target, rest, False
         host_port = parts[1].strip()
+        tunnel_mode = len(parts) >= 3 and parts[2].strip().upper() == "TUNNEL"
         if ":" in host_port:
             host, port_text = host_port.rsplit(":", 1)
             try:
@@ -241,7 +253,7 @@ class ExitNode:
         else:
             host = host_port
             port = default_target[1]
-        return (host, port), rest
+        return (host, port), rest, tunnel_mode
 
     async def read_response_stream(self, reader: asyncio.StreamReader) -> bytes:
         # 读取上游响应流，直到短时间无数据（适配真实 HTTP 响应）
@@ -300,12 +312,22 @@ class ExitNode:
             if self.behavior.params_by_path[path_id].enable_jitter:
                 await asyncio.sleep(jitter_ms / 1000 * random.random())
             writer.write(out_frame.encode())
-            await writer.drain()
+            try:
+                await writer.drain()
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+                LOGGER.info("下行发送失败 path %s: %s", path_id, exc)
+                self.path_writers.pop(path_id, None)
+                continue
             if self.behavior.update_burst(path_id):
                 template = out_frame
                 for padding in self.behavior.make_padding_frames(template):
                     writer.write(padding.encode())
-                    await writer.drain()
+                    try:
+                        await writer.drain()
+                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+                        LOGGER.info("填充发送失败 path %s: %s", path_id, exc)
+                        self.path_writers.pop(path_id, None)
+                        break
 
     async def start_window_loop(self) -> None:
         # 周期性窗口循环：策略更新与日志输出
