@@ -85,3 +85,8 @@ class MultiPathScheduler:
                 "loss": loss,
             }
         return data
+
+    def reset_stats(self) -> None:
+        # 重置路径统计与批次状态（新会话用）
+        self.stats = {path_id: PathStats() for path_id in self.path_ids}
+        self._batch_remaining = 0
