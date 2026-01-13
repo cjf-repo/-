@@ -380,6 +380,7 @@ class EntryNode:
             asyncio.create_task(
                 self.read_path(
                     reader,
+                    path_id,
                     client_writer,
                     fragment_buffer,
                     bytes_to_client,
@@ -388,13 +389,20 @@ class EntryNode:
                     delivered_response_len,
                 )
             )
-            for reader in readers
+            for path_id, reader in enumerate(readers)
         ]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for path_id, result in enumerate(results):
+            if isinstance(result, Exception):
+                LOGGER.warning("路径读取任务异常退出 path=%s error=%s", path_id, result)
+        if not close_after_response[0]:
+            close_after_response[0] = True
+            client_writer.close()
 
     async def read_path(
         self,
         reader: asyncio.StreamReader,
+        path_id: int,
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
         bytes_to_client: List[int],
@@ -404,7 +412,18 @@ class EntryNode:
     ) -> None:
         # 单路径读取并处理下行帧
         while True:
-            frame = await Frame.read_from(reader)
+            try:
+                frame = await Frame.read_from(reader)
+            except (
+                asyncio.IncompleteReadError,
+                ConnectionResetError,
+                ConnectionAbortedError,
+            ) as exc:
+                peer = None
+                if reader._transport is not None:
+                    peer = reader._transport.get_extra_info("peername")
+                LOGGER.info("路径已断开 path=%s peer=%s error=%s", path_id, peer, exc)
+                break
             if frame.flags & FLAG_ACK:
                 seq = ACK_STRUCT.unpack(frame.payload)[0]
                 self.scheduler.mark_ack(frame.path_id, seq)
