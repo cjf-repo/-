@@ -64,6 +64,13 @@ async def run() -> None:
     # 等待客户端完成后回收子进程
     if client_proc is not None:
         await client_proc.wait()
+    else:
+        try:
+            # 代理模式下保持运行，等待用户手动停止
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            pass
     for proc in processes:
         if proc.returncode is None:
             proc.terminate()
