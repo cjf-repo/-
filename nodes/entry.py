@@ -200,6 +200,8 @@ class EntryNode:
         bytes_from_client = 0
         bytes_to_client = [0]
         close_after_response = [False]
+        expected_response_len = [None]
+        delivered_response_len = [0]
         if self._window_task is None:
             self.behavior.start_window(self.window_id)
             self.proto.start_window(self.window_id, self.family_by_path, self.variant_by_path)
@@ -214,6 +216,8 @@ class EntryNode:
                 fragment_buffer,
                 bytes_to_client,
                 close_after_response,
+                expected_response_len,
+                delivered_response_len,
             )
         )
         try:
@@ -365,6 +369,8 @@ class EntryNode:
         fragment_buffer: FragmentBuffer,
         bytes_to_client: List[int],
         close_after_response: List[bool],
+        expected_response_len: List[int | None],
+        delivered_response_len: List[int],
     ) -> None:
         # 并发读取各路径下行数据
         readers = [reader for reader, _ in path_conns]
@@ -376,6 +382,8 @@ class EntryNode:
                     fragment_buffer,
                     bytes_to_client,
                     close_after_response,
+                    expected_response_len,
+                    delivered_response_len,
                 )
             )
             for reader in readers
@@ -389,6 +397,8 @@ class EntryNode:
         fragment_buffer: FragmentBuffer,
         bytes_to_client: List[int],
         close_after_response: List[bool],
+        expected_response_len: List[int | None],
+        delivered_response_len: List[int],
     ) -> None:
         # 单路径读取并处理下行帧
         while True:
@@ -414,6 +424,8 @@ class EntryNode:
                     client_writer,
                     bytes_to_client,
                     close_after_response,
+                    expected_response_len,
+                    delivered_response_len,
                 )
             else:
                 # 完整 payload 直接入队
@@ -425,6 +437,8 @@ class EntryNode:
                     client_writer,
                     bytes_to_client,
                     close_after_response,
+                    expected_response_len,
+                    delivered_response_len,
                 )
 
     async def enqueue_downlink(
@@ -434,17 +448,34 @@ class EntryNode:
         client_writer: asyncio.StreamWriter,
         bytes_to_client: List[int],
         close_after_response: List[bool],
+        expected_response_len: List[int | None],
+        delivered_response_len: List[int],
     ) -> None:
         # 按 seq 重排，确保回程数据按顺序交付给 client
         self._pending_down[seq] = payload
         while self._next_down_seq in self._pending_down:
             data = self._pending_down.pop(self._next_down_seq)
+            if self.config.proxy_mode and expected_response_len[0] is None:
+                marker = data.find(b"\n\n")
+                if data.startswith(b"RESP_LEN ") and marker != -1:
+                    header = data[:marker].decode("utf-8", errors="ignore")
+                    _, value = header.split(" ", 1)
+                    try:
+                        expected_response_len[0] = int(value.strip())
+                    except ValueError:
+                        expected_response_len[0] = None
+                    data = data[marker + 2 :]
             client_writer.write(data)
             await client_writer.drain()
             # 统计回传字节
             if self.config.proxy_mode:
                 bytes_to_client[0] += len(data)
-                if not close_after_response[0]:
+                delivered_response_len[0] += len(data)
+                if (
+                    expected_response_len[0] is not None
+                    and delivered_response_len[0] >= expected_response_len[0]
+                    and not close_after_response[0]
+                ):
                     close_after_response[0] = True
                     client_writer.close()
             self._next_down_seq += 1

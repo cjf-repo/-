@@ -196,6 +196,8 @@ class ExitNode:
             len(payload),
             len(response),
         )
+        if self.config.proxy_mode and self.config.server_mode == "forward":
+            response = f"RESP_LEN {len(response)}\n\n".encode("utf-8") + response
         await self.send_downlink(frame, response)
 
     def strip_target_prefix(self, payload: bytes) -> bytes:
