@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import shutil
+import signal
 from pathlib import Path
 
 from logger import setup_logger
@@ -16,7 +17,7 @@ LOGGER = setup_logger("capture_pcap")
 def resolve_capture_cmd() -> list[str] | None:
     # 优先使用 tcpdump，其次 tshark
     if shutil.which("tcpdump"):
-        return ["tcpdump", "-i", "any", "-n", "-s", "0"]
+        return ["tcpdump", "-i", "any", "-n", "-s", "0", "-U"]
     if shutil.which("tshark"):
         return ["tshark", "-i", "any", "-n"]
     return None
@@ -39,6 +40,7 @@ async def run_capture(
     check_startup: bool = False,
 ) -> asyncio.subprocess.Process | None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    output.touch(exist_ok=True)
     if "tcpdump" in cmd[0]:
         full_cmd = cmd + ["-w", str(output), bpf]
     else:
@@ -110,8 +112,16 @@ async def main() -> None:
             return
         tasks.append(proc)
 
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+
     try:
-        await asyncio.gather(*[proc.wait() for proc in tasks])
+        await asyncio.wait(
+            [asyncio.create_task(proc.wait()) for proc in tasks] + [asyncio.create_task(stop_event.wait())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
     except asyncio.CancelledError:
         pass
     finally:

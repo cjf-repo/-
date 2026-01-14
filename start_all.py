@@ -88,13 +88,12 @@ async def run() -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     if client_proc is not None:
-        done, _ = await asyncio.wait(
+        done, pending = await asyncio.wait(
             {asyncio.create_task(client_proc.wait()), asyncio.create_task(stop_event.wait())},
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for task in done:
-            if task is not None:
-                task.cancel()
+        for task in pending:
+            task.cancel()
     else:
         await stop_event.wait()
     for proc in processes:
