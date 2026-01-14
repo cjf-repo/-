@@ -31,7 +31,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def run_capture(cmd: list[str], output: Path, bpf: str) -> asyncio.subprocess.Process:
+async def run_capture(
+    cmd: list[str],
+    output: Path,
+    bpf: str,
+    *,
+    check_startup: bool = False,
+) -> asyncio.subprocess.Process | None:
     output.parent.mkdir(parents=True, exist_ok=True)
     if "tcpdump" in cmd[0]:
         full_cmd = cmd + ["-w", str(output), bpf]
@@ -39,7 +45,22 @@ async def run_capture(cmd: list[str], output: Path, bpf: str) -> asyncio.subproc
         # tshark 使用 -w 并通过 -f 指定捕获过滤器
         full_cmd = cmd + ["-f", bpf, "-w", str(output)]
     LOGGER.info("启动抓包: %s", " ".join(full_cmd))
-    return await asyncio.create_subprocess_exec(*full_cmd)
+    proc = await asyncio.create_subprocess_exec(
+        *full_cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    if check_startup:
+        await asyncio.sleep(0.2)
+        if proc.returncode is not None:
+            _, stderr = await proc.communicate()
+            stderr_text = (stderr or b"").decode(errors="ignore").strip()
+            if stderr_text:
+                LOGGER.error("抓包启动失败: %s", stderr_text)
+            else:
+                LOGGER.error("抓包启动失败：未知错误")
+            return None
+    return proc
 
 
 async def main() -> None:
@@ -52,29 +73,42 @@ async def main() -> None:
     middle_ports = [p.strip() for p in args.middle_ports.split(",") if p.strip()]
     base = Path(args.out_dir)
 
-    tasks = []
-    tasks.append(
-        await run_capture(
-            capture_cmd,
-            base / "entry.pcap",
-            f"tcp port {args.entry_port}",
-        )
+    tasks: list[asyncio.subprocess.Process] = []
+    first_proc = await run_capture(
+        capture_cmd,
+        base / "entry.pcap",
+        f"tcp port {args.entry_port}",
+        check_startup=True,
     )
-    tasks.append(
-        await run_capture(
-            capture_cmd,
-            base / "exit.pcap",
-            f"tcp port {args.exit_port}",
-        )
+    if first_proc is None:
+        LOGGER.warning("抓包权限不足或环境不支持，可设置 CAPTURE_PCAP=0 跳过抓包。")
+        return
+    tasks.append(first_proc)
+    exit_proc = await run_capture(
+        capture_cmd,
+        base / "exit.pcap",
+        f"tcp port {args.exit_port}",
+        check_startup=True,
     )
+    if exit_proc is None:
+        for proc in tasks:
+            if proc.returncode is None:
+                proc.terminate()
+        return
+    tasks.append(exit_proc)
     for idx, port in enumerate(middle_ports):
-        tasks.append(
-            await run_capture(
-                capture_cmd,
-                base / f"middle_{idx}.pcap",
-                f"tcp port {port}",
-            )
+        proc = await run_capture(
+            capture_cmd,
+            base / f"middle_{idx}.pcap",
+            f"tcp port {port}",
+            check_startup=True,
         )
+        if proc is None:
+            for started in tasks:
+                if started.returncode is None:
+                    started.terminate()
+            return
+        tasks.append(proc)
 
     try:
         await asyncio.gather(*[proc.wait() for proc in tasks])
