@@ -145,7 +145,7 @@ class ExitNode:
         except asyncio.IncompleteReadError:
             LOGGER.info("中继节点已断开 %s", addr)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
-            LOGGER.info("中继连接异常断开 %s: %s", addr, exc)
+            LOGGER.debug("中继连接已关闭 %s: %s", addr, exc)
 
     async def send_ack(self, frame: Frame) -> None:
         # 回发 ACK
@@ -168,7 +168,7 @@ class ExitNode:
             writer.write(ack_frame.encode())
             await writer.drain()
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
-            LOGGER.info("ACK 发送失败 path %s: %s", frame.path_id, exc)
+            LOGGER.debug("ACK 发送失败 path %s: %s", frame.path_id, exc)
             self.path_writers.pop(frame.path_id, None)
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
@@ -317,7 +317,7 @@ class ExitNode:
             try:
                 await writer.drain()
             except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
-                LOGGER.info("下行发送失败 path %s: %s", path_id, exc)
+                LOGGER.debug("下行发送失败 path %s: %s", path_id, exc)
                 self.path_writers.pop(path_id, None)
                 continue
             if self.behavior.update_burst(path_id):
@@ -327,7 +327,7 @@ class ExitNode:
                     try:
                         await writer.drain()
                     except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
-                        LOGGER.info("填充发送失败 path %s: %s", path_id, exc)
+                        LOGGER.debug("填充发送失败 path %s: %s", path_id, exc)
                         self.path_writers.pop(path_id, None)
                         break
 
