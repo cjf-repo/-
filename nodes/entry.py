@@ -54,6 +54,7 @@ class EntryNode:
         # 协议混淆器
         self.proto = ProtoObfuscator()
         # 基线行为参数
+        enable_behavior = config.enable_behavior
         base_params = BehaviorParams(
             size_bins=config.size_bins,
             q_dist=[1 / len(config.size_bins) for _ in config.size_bins],
@@ -62,17 +63,16 @@ class EntryNode:
             rate_bytes_per_sec=config.base_rate_bytes_per_sec,
             burst_size=6,
             obfuscation_level=config.obfuscation_level,
-            enable_shaping=True,
-            enable_padding=True,
-            enable_pacing=True,
-            enable_jitter=True,
+            enable_shaping=enable_behavior,
+            enable_padding=enable_behavior,
+            enable_pacing=enable_behavior,
+            enable_jitter=enable_behavior,
         )
         # baseline 模式仅使用单路径
-        self.active_middle_ports = (
-            [config.middle_ports[0]]
-            if config.mode.startswith("baseline")
-            else list(config.middle_ports)
-        )
+        if config.mode.startswith("baseline") or not config.enable_multipath:
+            self.active_middle_ports = [config.middle_ports[0]]
+        else:
+            self.active_middle_ports = list(config.middle_ports)
         # 行为整形器
         self.behavior = BehaviorShaper(
             base_params,
@@ -192,6 +192,8 @@ class EntryNode:
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 发送握手帧，建立协议上下文
+        if not self.config.enable_obfuscation:
+            return
         for path_id, (_, writer) in enumerate(conns):
             family_id = self.family_by_path.get(path_id, 1)
             variant_id = self.variant_by_path.get(path_id, 0)
@@ -390,8 +392,9 @@ class EntryNode:
                 frag_total=total,
                 payload=payload,
             )
-            frame = self.proto.apply(frame, family_id, variant_id)
-            frame = self.proto.encode_payload(frame, family_id, variant_id)
+            if self.config.enable_obfuscation:
+                frame = self.proto.apply(frame, family_id, variant_id)
+                frame = self.proto.encode_payload(frame, family_id, variant_id)
             self.scheduler.mark_sent(path_id, seq)
             await self.behavior.pace(path_id, len(payload))
             jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
@@ -551,7 +554,9 @@ class EntryNode:
                 continue
             if frame.flags & FLAG_FRAGMENT:
                 # 分片重组
-                if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
+                if self.config.enable_obfuscation and not (
+                    frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)
+                ):
                     frame = self.proto.decode_payload(frame)
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
@@ -574,7 +579,9 @@ class EntryNode:
                     )
             else:
                 # 完整 payload 直接入队
-                if not (frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)):
+                if self.config.enable_obfuscation and not (
+                    frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)
+                ):
                     frame = self.proto.decode_payload(frame)
                 if self._tunnel_mode:
                     await self.forward_tunnel_downlink(
@@ -617,6 +624,17 @@ class EntryNode:
             expected_response_len,
             delivered_response_len,
         )
+
+    async def forward_tunnel_downlink(
+        self,
+        payload: bytes,
+        client_writer: asyncio.StreamWriter,
+        bytes_to_client: List[int],
+    ) -> None:
+        client_writer.write(payload)
+        await client_writer.drain()
+        if self.config.proxy_mode:
+            bytes_to_client[0] += len(payload)
 
     async def forward_tunnel_downlink(
         self,

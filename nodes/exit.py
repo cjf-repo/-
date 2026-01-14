@@ -48,6 +48,7 @@ class ExitNode:
         # 协议混淆器
         self.proto = ProtoObfuscator()
         # 基线行为参数
+        enable_behavior = config.enable_behavior
         base_params = BehaviorParams(
             size_bins=config.size_bins,
             q_dist=[1 / len(config.size_bins) for _ in config.size_bins],
@@ -56,17 +57,16 @@ class ExitNode:
             rate_bytes_per_sec=config.base_rate_bytes_per_sec,
             burst_size=6,
             obfuscation_level=config.obfuscation_level,
-            enable_shaping=True,
-            enable_padding=True,
-            enable_pacing=True,
-            enable_jitter=True,
+            enable_shaping=enable_behavior,
+            enable_padding=enable_behavior,
+            enable_pacing=enable_behavior,
+            enable_jitter=enable_behavior,
         )
         # baseline 模式仅使用单路径
-        self.active_middle_ports = (
-            [config.middle_ports[0]]
-            if config.mode.startswith("baseline")
-            else list(config.middle_ports)
-        )
+        if config.mode.startswith("baseline") or not config.enable_multipath:
+            self.active_middle_ports = [config.middle_ports[0]]
+        else:
+            self.active_middle_ports = list(config.middle_ports)
         # 行为整形器
         self.behavior = BehaviorShaper(
             base_params,
@@ -130,7 +130,8 @@ class ExitNode:
                 self.path_writers[frame.path_id] = writer
                 if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_ACK):
                     continue
-                frame = self.proto.decode_payload(frame)
+                if self.config.enable_obfuscation:
+                    frame = self.proto.decode_payload(frame)
                 # 处理分片或完整 payload
                 if frame.flags & FLAG_FRAGMENT:
                     complete, payload = self.fragment_buffer.add(frame)
@@ -305,8 +306,9 @@ class ExitNode:
                 frag_total=total,
                 payload=payload,
             )
-            out_frame = self.proto.apply(out_frame, family_id, variant_id)
-            out_frame = self.proto.encode_payload(out_frame, family_id, variant_id)
+            if self.config.enable_obfuscation:
+                out_frame = self.proto.apply(out_frame, family_id, variant_id)
+                out_frame = self.proto.encode_payload(out_frame, family_id, variant_id)
             await self.behavior.pace(path_id, len(payload))
             jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
             if self.behavior.params_by_path[path_id].enable_jitter:
