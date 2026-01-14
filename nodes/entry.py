@@ -658,6 +658,17 @@ class EntryNode:
         if self.config.proxy_mode:
             bytes_to_client[0] += len(payload)
 
+    async def forward_tunnel_downlink(
+        self,
+        payload: bytes,
+        client_writer: asyncio.StreamWriter,
+        bytes_to_client: List[int],
+    ) -> None:
+        client_writer.write(payload)
+        await client_writer.drain()
+        if self.config.proxy_mode:
+            bytes_to_client[0] += len(payload)
+
 
 async def main() -> None:
     # 启动入口节点服务

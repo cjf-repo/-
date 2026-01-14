@@ -48,8 +48,8 @@ async def run() -> None:
     await asyncio.sleep(0.5)
     # 可选：启动抓包
     capture_proc = None
-    if os.environ.get("CAPTURE_PCAP") == "1":
-        capture_dir = os.environ.get("CAPTURE_DIR") or f"{out_dir}/pcap"
+    if DEFAULT_CONFIG.capture_pcap or os.environ.get("CAPTURE_PCAP") == "1":
+        capture_dir = os.environ.get("CAPTURE_DIR") or DEFAULT_CONFIG.capture_dir or f"{out_dir}/pcap"
         capture_proc = await asyncio.create_subprocess_exec(
             python,
             "-m",
