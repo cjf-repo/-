@@ -361,53 +361,58 @@ class EntryNode:
         return (host, port), rewritten, None, False
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
-        # 将上行 payload 分片并发送
-        seq = self.seq_counter
-        self.seq_counter += 1
-        remaining = data
-        fragments: List[tuple[int, bytes]] = []
+        # 将上行 payload 分片并流式发送
+        remaining = memoryview(data)
+        max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
         while remaining:
-            # 路径调度 + 按路径目标分布选择分片长度
-            path_id = self.scheduler.choose_path()
-            params = self.behavior.params_by_path[path_id]
-            target_len = len(remaining) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
-            piece = remaining[:target_len]
-            remaining = remaining[target_len:]
-            fragments.append((path_id, piece))
-            self.behavior.note_real_bytes(path_id, len(piece))
-        total = len(fragments)
-        for frag_id, (path_id, payload) in enumerate(fragments):
-            # 为每个分片构建帧并发送
-            family_id = self.family_by_path.get(path_id, 1)
-            variant_id = self.variant_by_path.get(path_id, 0)
-            frame = Frame(
-                session_id=self.session_id,
-                seq=seq,
-                direction=DIR_UP,
-                path_id=path_id,
-                window_id=self.window_id,
-                proto_id=family_id,
-                flags=FLAG_FRAGMENT,
-                frag_id=frag_id,
-                frag_total=total,
-                payload=payload,
-            )
-            if self.config.enable_obfuscation:
-                frame = self.proto.apply(frame, family_id, variant_id)
-                frame = self.proto.encode_payload(frame, family_id, variant_id)
-            self.scheduler.mark_sent(path_id, seq)
-            await self.behavior.pace(path_id, len(payload))
-            jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
-            if self.behavior.params_by_path[path_id].enable_jitter:
-                await asyncio.sleep(jitter_ms / 1000 * random.random())
-            _, writer = path_conns[path_id]
-            writer.write(frame.encode())
-            await writer.drain()
-            if self.behavior.update_burst(path_id):
-                template = frame
-                for padding in self.behavior.make_padding_frames(template):
-                    writer.write(padding.encode())
-                    await writer.drain()
+            chunk = remaining[:max_chunk]
+            remaining = remaining[len(chunk) :]
+            seq = self.seq_counter
+            self.seq_counter += 1
+            fragments: List[tuple[int, bytes]] = []
+            pending = bytes(chunk)
+            while pending:
+                # 路径调度 + 按路径目标分布选择分片长度
+                path_id = self.scheduler.choose_path()
+                params = self.behavior.params_by_path[path_id]
+                target_len = len(pending) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
+                piece = pending[:target_len]
+                pending = pending[target_len:]
+                fragments.append((path_id, piece))
+                self.behavior.note_real_bytes(path_id, len(piece))
+            total = len(fragments)
+            for frag_id, (path_id, payload) in enumerate(fragments):
+                # 为每个分片构建帧并发送
+                family_id = self.family_by_path.get(path_id, 1)
+                variant_id = self.variant_by_path.get(path_id, 0)
+                frame = Frame(
+                    session_id=self.session_id,
+                    seq=seq,
+                    direction=DIR_UP,
+                    path_id=path_id,
+                    window_id=self.window_id,
+                    proto_id=family_id,
+                    flags=FLAG_FRAGMENT,
+                    frag_id=frag_id,
+                    frag_total=total,
+                    payload=payload,
+                )
+                if self.config.enable_obfuscation:
+                    frame = self.proto.apply(frame, family_id, variant_id)
+                    frame = self.proto.encode_payload(frame, family_id, variant_id)
+                self.scheduler.mark_sent(path_id, seq)
+                await self.behavior.pace(path_id, len(payload))
+                jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
+                if self.behavior.params_by_path[path_id].enable_jitter:
+                    await asyncio.sleep(jitter_ms / 1000 * random.random())
+                _, writer = path_conns[path_id]
+                writer.write(frame.encode())
+                await writer.drain()
+                if self.behavior.update_burst(path_id):
+                    template = frame
+                    for padding in self.behavior.make_padding_frames(template):
+                        writer.write(padding.encode())
+                        await writer.drain()
 
     def _reset_missing_timer(self) -> None:
         candidates = [

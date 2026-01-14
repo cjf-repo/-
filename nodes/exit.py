@@ -100,6 +100,7 @@ class ExitNode:
         self._server_conns: Dict[int, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._server_targets: Dict[int, tuple[str, int]] = {}
         self._server_tunnels: Dict[int, bool] = {}
+        self._down_seq_counter: Dict[int, int] = {}
         self._window_task: asyncio.Task | None = None
         self.window_id = 0
         # 协议族/变体映射
@@ -217,6 +218,7 @@ class ExitNode:
     def close_proxy_session(self, session_id: int) -> None:
         # 代理模式下结束会话：关闭与上游和中继的连接
         conn = self._server_conns.pop(session_id, None)
+        self._down_seq_counter.pop(session_id, None)
         if conn:
             reader, writer = conn
             writer.close()
@@ -270,66 +272,75 @@ class ExitNode:
         return bytes(chunks)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
-        # 下行分片并发送
-        remaining = data
-        fragments: List[tuple[int, bytes]] = []
+        # 下行分片并流式发送
+        remaining = memoryview(data)
+        max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        seq = self._down_seq_counter.get(frame.session_id, 0)
         while remaining:
-            available_paths = list(self.path_writers.keys())
-            if not available_paths:
-                return
-            # 回程仅在可用路径内调度，避免分片丢失
-            path_id = self.scheduler.choose_path_from(available_paths)
-            target_len = self.behavior.sample_target_len(path_id)
-            params = self.behavior.params_by_path[path_id]
-            if not params.enable_shaping:
-                target_len = len(remaining)
-            piece = remaining[:target_len]
-            remaining = remaining[target_len:]
-            fragments.append((path_id, piece))
-            self.behavior.note_real_bytes(path_id, len(piece))
-        total = len(fragments)
-        for frag_id, (path_id, payload) in enumerate(fragments):
-            writer = self.path_writers.get(path_id)
-            if not writer:
-                continue
-            family_id = self.family_by_path.get(path_id, 1)
-            variant_id = self.variant_by_path.get(path_id, 0)
-            out_frame = Frame(
-                session_id=frame.session_id,
-                seq=frame.seq,
-                direction=DIR_DOWN,
-                path_id=path_id,
-                window_id=frame.window_id,
-                proto_id=family_id,
-                flags=FLAG_FRAGMENT,
-                frag_id=frag_id,
-                frag_total=total,
-                payload=payload,
-            )
-            if self.config.enable_obfuscation:
-                out_frame = self.proto.apply(out_frame, family_id, variant_id)
-                out_frame = self.proto.encode_payload(out_frame, family_id, variant_id)
-            await self.behavior.pace(path_id, len(payload))
-            jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
-            if self.behavior.params_by_path[path_id].enable_jitter:
-                await asyncio.sleep(jitter_ms / 1000 * random.random())
-            writer.write(out_frame.encode())
-            try:
-                await writer.drain()
-            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
-                LOGGER.debug("下行发送失败 path %s: %s", path_id, exc)
-                self.path_writers.pop(path_id, None)
-                continue
-            if self.behavior.update_burst(path_id):
-                template = out_frame
-                for padding in self.behavior.make_padding_frames(template):
-                    writer.write(padding.encode())
-                    try:
-                        await writer.drain()
-                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
-                        LOGGER.debug("填充发送失败 path %s: %s", path_id, exc)
-                        self.path_writers.pop(path_id, None)
-                        break
+            chunk = remaining[:max_chunk]
+            remaining = remaining[len(chunk) :]
+            fragments: List[tuple[int, bytes]] = []
+            pending = bytes(chunk)
+            while pending:
+                available_paths = list(self.path_writers.keys())
+                if not available_paths:
+                    self._down_seq_counter[frame.session_id] = seq
+                    return
+                # 回程仅在可用路径内调度，避免分片丢失
+                path_id = self.scheduler.choose_path_from(available_paths)
+                target_len = self.behavior.sample_target_len(path_id)
+                params = self.behavior.params_by_path[path_id]
+                if not params.enable_shaping:
+                    target_len = len(pending)
+                piece = pending[:target_len]
+                pending = pending[target_len:]
+                fragments.append((path_id, piece))
+                self.behavior.note_real_bytes(path_id, len(piece))
+            total = len(fragments)
+            for frag_id, (path_id, payload) in enumerate(fragments):
+                writer = self.path_writers.get(path_id)
+                if not writer:
+                    continue
+                family_id = self.family_by_path.get(path_id, 1)
+                variant_id = self.variant_by_path.get(path_id, 0)
+                out_frame = Frame(
+                    session_id=frame.session_id,
+                    seq=seq,
+                    direction=DIR_DOWN,
+                    path_id=path_id,
+                    window_id=frame.window_id,
+                    proto_id=family_id,
+                    flags=FLAG_FRAGMENT,
+                    frag_id=frag_id,
+                    frag_total=total,
+                    payload=payload,
+                )
+                if self.config.enable_obfuscation:
+                    out_frame = self.proto.apply(out_frame, family_id, variant_id)
+                    out_frame = self.proto.encode_payload(out_frame, family_id, variant_id)
+                await self.behavior.pace(path_id, len(payload))
+                jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
+                if self.behavior.params_by_path[path_id].enable_jitter:
+                    await asyncio.sleep(jitter_ms / 1000 * random.random())
+                writer.write(out_frame.encode())
+                try:
+                    await writer.drain()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+                    LOGGER.debug("下行发送失败 path %s: %s", path_id, exc)
+                    self.path_writers.pop(path_id, None)
+                    continue
+                if self.behavior.update_burst(path_id):
+                    template = out_frame
+                    for padding in self.behavior.make_padding_frames(template):
+                        writer.write(padding.encode())
+                        try:
+                            await writer.drain()
+                        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+                            LOGGER.debug("填充发送失败 path %s: %s", path_id, exc)
+                            self.path_writers.pop(path_id, None)
+                            break
+            seq += 1
+        self._down_seq_counter[frame.session_id] = seq
 
     async def start_window_loop(self) -> None:
         # 周期性窗口循环：策略更新与日志输出
