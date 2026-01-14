@@ -59,11 +59,16 @@ python start_all.py
 - `MODE`：运行模式（`normal` / `baseline_delay` / `baseline_padding`）
 - `PROTO_SWITCH_PERIOD`：协议族切换周期（窗口数）
 - `ADAPTIVE_PATHS` / `ADAPTIVE_BEHAVIOR` / `ADAPTIVE_PROTO`：自适应消融开关
+- `ENABLE_MULTIPATH`：多路径开关（关闭后强制单路径）
+- `ENABLE_BEHAVIOR`：行为伪装开关（整形/填充/抖动/限速）
+- `ENABLE_OBFUSCATION`：属性伪装开关（协议模板/握手/编码）
 - `SERVER_HOST` / `SERVER_PORT`：外部目标服务地址与端口
 - `SERVER_MODE`：目标服务模式（`echo` / `forward`）
 - `PROXY_MODE`：入口是否作为 HTTP 代理（仅支持明文 HTTP）
 - `SEED`：随机种子
 - `RUN_ID` / `OUT_DIR`：输出目录控制
+- `CAPTURE_PCAP`：是否自动抓包（需要 tcpdump/tshark）
+- `CAPTURE_DIR`：pcap 输出目录（默认 `<out_dir>/pcap`）
 - `SESSION_COUNT` / `SESSION_DURATION`：客户端发送次数/时长
 
 示例（固定 2 条路径、关闭行为自适应、协议按 3 个窗口切换）：
