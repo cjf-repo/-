@@ -67,6 +67,8 @@ python start_all.py
 - `PROXY_MODE`：入口是否作为 HTTP 代理（仅支持明文 HTTP）
 - `SEED`：随机种子
 - `RUN_ID` / `OUT_DIR`：输出目录控制
+- `CAPTURE_PCAP`：是否自动抓包（需要 tcpdump/tshark）
+- `CAPTURE_DIR`：pcap 输出目录（默认 `<out_dir>/pcap`）
 - `SESSION_COUNT` / `SESSION_DURATION`：客户端发送次数/时长
 
 示例（固定 2 条路径、关闭行为自适应、协议按 3 个窗口切换）：
