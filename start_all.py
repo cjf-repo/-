@@ -46,6 +46,25 @@ async def run() -> None:
     # 启动入口节点
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.entry", env=base_env))
     await asyncio.sleep(0.5)
+    # 可选：启动抓包
+    capture_proc = None
+    if os.environ.get("CAPTURE_PCAP") == "1":
+        capture_dir = os.environ.get("CAPTURE_DIR") or f"{out_dir}/pcap"
+        capture_proc = await asyncio.create_subprocess_exec(
+            python,
+            "-m",
+            "tools.capture_pcap",
+            "--out-dir",
+            capture_dir,
+            "--entry-port",
+            str(DEFAULT_CONFIG.entry_port),
+            "--exit-port",
+            str(DEFAULT_CONFIG.exit_port),
+            "--middle-ports",
+            ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports]),
+            env=base_env,
+        )
+        processes.append(capture_proc)
     # 启动客户端应用（代理模式下由浏览器/curl 触发）
     client_proc = None
     if os.environ.get("PROXY_MODE") != "1":
