@@ -17,7 +17,7 @@ async def run() -> None:
     # 支持环境变量覆盖 run_id 与输出目录
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
-    base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
+    base_env = {**os.environ, "RUN_ID": run_id, "OUT_DIR": out_dir}
     # 启动目标服务（外部真实服务模式可跳过）
     if os.environ.get("EXTERNAL_SERVER") != "1":
         processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.server", env=base_env))
@@ -46,6 +46,25 @@ async def run() -> None:
     # 启动入口节点
     processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.entry", env=base_env))
     await asyncio.sleep(0.5)
+    # 可选：启动抓包
+    capture_proc = None
+    if DEFAULT_CONFIG.capture_pcap or os.environ.get("CAPTURE_PCAP") == "1":
+        capture_dir = os.environ.get("CAPTURE_DIR") or DEFAULT_CONFIG.capture_dir or f"{out_dir}/pcap"
+        capture_proc = await asyncio.create_subprocess_exec(
+            python,
+            "-m",
+            "tools.capture_pcap",
+            "--out-dir",
+            capture_dir,
+            "--entry-port",
+            str(DEFAULT_CONFIG.entry_port),
+            "--exit-port",
+            str(DEFAULT_CONFIG.exit_port),
+            "--middle-ports",
+            ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports]),
+            env=base_env,
+        )
+        processes.append(capture_proc)
     # 启动客户端应用（代理模式下由浏览器/curl 触发）
     client_proc = None
     if os.environ.get("PROXY_MODE") != "1":

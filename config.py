@@ -72,8 +72,20 @@ class Config:
     # 自适应协议开关
     adaptive_proto: bool = True
 
+    # 多路径开关
+    enable_multipath: bool = True
+    # 行为伪装开关（整形/填充/抖动/限速）
+    enable_behavior: bool = True
+    # 属性伪装开关（协议模板/握手/编码）
+    enable_obfuscation: bool = True
+
     # ACK 超时时间
     ack_timeout_sec: float = 2.0
+
+    # 抓包开关
+    capture_pcap: bool = False
+    # 抓包输出目录
+    capture_dir: str | None = None
 
     def paths(self) -> List[PathConfig]:
         # 根据端口列表生成路径配置
@@ -126,6 +138,11 @@ def load_config_from_env() -> Config:
     config.adaptive_paths = _env_bool("ADAPTIVE_PATHS", config.adaptive_paths)
     config.adaptive_behavior = _env_bool("ADAPTIVE_BEHAVIOR", config.adaptive_behavior)
     config.adaptive_proto = _env_bool("ADAPTIVE_PROTO", config.adaptive_proto)
+    config.enable_multipath = _env_bool("ENABLE_MULTIPATH", config.enable_multipath)
+    config.enable_behavior = _env_bool("ENABLE_BEHAVIOR", config.enable_behavior)
+    config.enable_obfuscation = _env_bool("ENABLE_OBFUSCATION", config.enable_obfuscation)
+    config.capture_pcap = _env_bool("CAPTURE_PCAP", config.capture_pcap)
+    config.capture_dir = os.environ.get("CAPTURE_DIR") or config.capture_dir
     # 如提供 SEED 则固定随机种子
     seed = os.environ.get("SEED")
     if seed is not None:
