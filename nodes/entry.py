@@ -292,11 +292,17 @@ class EntryNode:
         finally:
             downlink_task.cancel()
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                LOGGER.info("客户端连接已重置 %s", addr)
             self._downlink_state = None
             for _, path_writer in path_conns:
                 path_writer.close()
-                await path_writer.wait_closed()
+                try:
+                    await path_writer.wait_closed()
+                except ConnectionResetError:
+                    LOGGER.debug("中继连接已重置 %s", addr)
             LOGGER.info(
                 "代理连接关闭 %s，收到 %s 字节，返回 %s 字节",
                 addr,
