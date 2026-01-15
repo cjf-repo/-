@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import uuid
+import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from pathlib import Path
@@ -197,8 +198,12 @@ def main() -> None:
             )
         finally:
             if capture_proc is not None:
-                capture_proc.terminate()
-                capture_proc.wait(timeout=5)
+                capture_proc.send_signal(signal.SIGINT)
+                try:
+                    capture_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    capture_proc.terminate()
+                    capture_proc.wait(timeout=5)
             if run_dir is not None and args.pcap_dir is not None:
                 label = url_label(url)
                 move_pcap_files(run_dir, Path(args.pcap_dir), label, count)

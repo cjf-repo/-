@@ -127,6 +127,15 @@ async def main() -> None:
     finally:
         for proc in tasks:
             if proc.returncode is None:
+                proc.send_signal(signal.SIGINT)
+        waiters = []
+        for proc in tasks:
+            if proc.returncode is None:
+                waiters.append(asyncio.wait_for(proc.wait(), timeout=2))
+        if waiters:
+            await asyncio.gather(*waiters, return_exceptions=True)
+        for proc in tasks:
+            if proc.returncode is None:
                 proc.terminate()
 
 
