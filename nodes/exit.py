@@ -227,8 +227,6 @@ class ExitNode:
         if conn:
             reader, writer = conn
             writer.close()
-        for writer in self.path_writers.values():
-            writer.close()
 
     def strip_target_prefix(self, payload: bytes) -> bytes:
         if payload.startswith(b"TARGET "):
