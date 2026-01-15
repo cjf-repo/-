@@ -176,8 +176,14 @@ async def bridge(
         # 关闭双向连接
         writer.close()
         dest_writer.close()
-        await writer.wait_closed()
-        await dest_writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            LOGGER.debug("入口侧关闭时连接已重置")
+        try:
+            await dest_writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            LOGGER.debug("出口侧关闭时连接已重置")
 
 
 async def handle_entry(

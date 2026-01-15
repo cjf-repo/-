@@ -305,8 +305,10 @@ class EntryNode:
                 path_writer.close()
                 try:
                     await path_writer.wait_closed()
-                except ConnectionResetError:
+                except (ConnectionResetError, BrokenPipeError):
                     LOGGER.debug("中继连接已重置 %s", addr)
+                except Exception as exc:
+                    LOGGER.debug("中继关闭等待异常 %s: %s", addr, exc)
             LOGGER.info(
                 "代理连接关闭 %s，收到 %s 字节，返回 %s 字节",
                 addr,
