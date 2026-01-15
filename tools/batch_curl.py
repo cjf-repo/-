@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -22,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout", type=int, default=20, help="curl 超时秒数")
     parser.add_argument("--sleep", type=float, default=0.0, help="每次访问间隔秒数")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="并发请求数量（默认 1，>1 会并发执行 URL 访问）",
+    )
     parser.add_argument(
         "--user-agent",
         default=(
@@ -146,14 +153,19 @@ def main() -> None:
         raise SystemExit("未读取到有效 URL，请检查输入文件。")
     if args.times < 1:
         raise SystemExit("--times 必须 >= 1")
+    if args.concurrency < 1:
+        raise SystemExit("--concurrency 必须 >= 1")
     failures = 0
-    url_counts: dict[str, int] = {}
+    tasks: list[tuple[str, int]] = []
     for url in urls:
-        for _ in range(args.times):
-            count = url_counts.get(url, 0) + 1
-            capture_proc = None
-            run_dir = None
-            output_path = None
+        for count in range(1, args.times + 1):
+            tasks.append((url, count))
+
+    def worker(url: str, count: int) -> int:
+        capture_proc = None
+        run_dir = None
+        output_path = None
+        try:
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
@@ -162,7 +174,7 @@ def main() -> None:
                     time.sleep(args.pcap_wait)
             if args.output_dir is not None:
                 output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
-            code = run_curl(
+            return run_curl(
                 url,
                 args.proxy,
                 args.timeout,
@@ -171,17 +183,22 @@ def main() -> None:
                 insecure=args.insecure,
                 output_path=output_path,
             )
+        finally:
             if capture_proc is not None:
                 capture_proc.terminate()
                 capture_proc.wait(timeout=5)
-                if run_dir is not None:
-                    label = url_label(url)
-                    move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
-            url_counts[url] = count
-            if code != 0:
-                failures += 1
+            if run_dir is not None and args.pcap_dir is not None:
+                label = url_label(url)
+                move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
             if args.sleep > 0:
                 time.sleep(args.sleep)
+
+    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        futures = [executor.submit(worker, url, count) for url, count in tasks]
+        for future in as_completed(futures):
+            code = future.result()
+            if code != 0:
+                failures += 1
     if failures:
         raise SystemExit(f"共有 {failures} 次请求失败。")
 
