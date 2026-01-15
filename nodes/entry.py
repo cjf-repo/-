@@ -294,8 +294,12 @@ class EntryNode:
             writer.close()
             try:
                 await writer.wait_closed()
-            except ConnectionResetError:
+            except (ConnectionResetError, BrokenPipeError):
                 LOGGER.info("客户端连接已重置 %s", addr)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.debug("客户端关闭等待异常 %s: %s", addr, exc)
             self._downlink_state = None
             for _, path_writer in path_conns:
                 path_writer.close()
