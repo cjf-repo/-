@@ -21,7 +21,12 @@ def parse_args() -> argparse.Namespace:
         default="http://127.0.0.1:9001",
         help="代理地址（入口节点），例如 http://127.0.0.1:9001",
     )
-    parser.add_argument("--timeout", type=int, default=20, help="curl 超时秒数")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=20,
+        help="curl 超时秒数（<=0 表示不设置超时）",
+    )
     parser.add_argument("--sleep", type=float, default=0.0, help="每次访问间隔秒数")
     parser.add_argument(
         "--concurrency",
@@ -104,12 +109,13 @@ def run_curl(
         "-sS",
         "--proxy",
         proxy,
-        "--max-time",
-        str(timeout),
         "-A",
         user_agent,
         url,
     ]
+    if timeout > 0:
+        cmd.insert(4, "--max-time")
+        cmd.insert(5, str(timeout))
     if follow_redirects:
         cmd.insert(1, "-L")
     if insecure:
