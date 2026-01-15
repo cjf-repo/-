@@ -93,6 +93,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="保存每次执行的 curl 命令到文件（默认不保存）",
     )
+    parser.add_argument(
+        "--retry",
+        type=int,
+        default=0,
+        help="失败后重试次数（默认不重试）",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=0.5,
+        help="失败重试间隔秒数",
+    )
     return parser.parse_args()
 
 
@@ -182,6 +194,8 @@ def main() -> None:
         raise SystemExit("--times 必须 >= 1")
     if args.concurrency < 1:
         raise SystemExit("--concurrency 必须 >= 1")
+    if args.retry < 0:
+        raise SystemExit("--retry 必须 >= 0")
     failures = 0
     failure_entries: list[str] = []
     cmd_lines: list[str] = []
@@ -219,7 +233,14 @@ def main() -> None:
                     cmd_lines.append(cmd_line)
                     if args.print_cmd:
                         print(cmd_line, flush=True)
-            return run_curl(cmd)
+            attempts = args.retry + 1
+            for attempt in range(attempts):
+                code = run_curl(cmd)
+                if code == 0:
+                    return code
+                if attempt < attempts - 1 and args.retry_delay > 0:
+                    time.sleep(args.retry_delay)
+            return code
         finally:
             if capture_proc is not None:
                 capture_proc.send_signal(signal.SIGINT)
