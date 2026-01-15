@@ -130,9 +130,11 @@ def url_label(url: str) -> str:
     return "".join(safe).strip("_") or "url"
 
 
-def move_pcap_files(run_dir: Path, base_dir: Path, label: str) -> None:
+def move_pcap_files(run_dir: Path, base_dir: Path, label: str, count: int) -> None:
+    target_dir = base_dir / label
+    target_dir.mkdir(parents=True, exist_ok=True)
     for path in run_dir.glob("*.pcap"):
-        target = base_dir / f"{label}_{path.stem}.pcap"
+        target = target_dir / f"{count}_{path.stem}.pcap"
         path.replace(target)
     run_dir.rmdir()
 
@@ -173,8 +175,8 @@ def main() -> None:
                 capture_proc.terminate()
                 capture_proc.wait(timeout=5)
                 if run_dir is not None:
-                    label = f"{url_label(url)}_{count}"
-                    move_pcap_files(run_dir, Path(args.pcap_dir), label)
+                    label = url_label(url)
+                    move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
             url_counts[url] = count
             if code != 0:
                 failures += 1
