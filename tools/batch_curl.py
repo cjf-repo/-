@@ -6,6 +6,7 @@ import sys
 import time
 import uuid
 import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from pathlib import Path
@@ -82,6 +83,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="保存失败请求列表的文件路径（默认不保存）",
     )
+    parser.add_argument(
+        "--print-cmd",
+        action="store_true",
+        help="打印每次执行的 curl 命令",
+    )
+    parser.add_argument(
+        "--cmd-file",
+        default=None,
+        help="保存每次执行的 curl 命令到文件（默认不保存）",
+    )
     return parser.parse_args()
 
 
@@ -95,7 +106,7 @@ def read_urls(path: Path) -> list[str]:
     return urls
 
 
-def run_curl(
+def build_curl_cmd(
     url: str,
     proxy: str,
     timeout: int,
@@ -104,7 +115,7 @@ def run_curl(
     follow_redirects: bool,
     insecure: bool,
     output_path: Path | None,
-) -> int:
+) -> list[str]:
     cmd = [
         "curl",
         "-sS",
@@ -126,6 +137,10 @@ def run_curl(
     else:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         cmd.extend(["-o", str(output_path)])
+    return cmd
+
+
+def run_curl(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
@@ -169,6 +184,8 @@ def main() -> None:
         raise SystemExit("--concurrency 必须 >= 1")
     failures = 0
     failure_entries: list[str] = []
+    cmd_lines: list[str] = []
+    cmd_lock = threading.Lock()
     tasks: list[tuple[str, int]] = []
     for url in urls:
         for count in range(1, args.times + 1):
@@ -187,7 +204,7 @@ def main() -> None:
                     time.sleep(args.pcap_wait)
             if args.output_dir is not None:
                 output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
-            return run_curl(
+            cmd = build_curl_cmd(
                 url,
                 args.proxy,
                 args.timeout,
@@ -196,6 +213,13 @@ def main() -> None:
                 insecure=args.insecure,
                 output_path=output_path,
             )
+            if args.print_cmd or args.cmd_file is not None:
+                cmd_line = " ".join(cmd)
+                with cmd_lock:
+                    cmd_lines.append(cmd_line)
+                    if args.print_cmd:
+                        print(cmd_line, flush=True)
+            return run_curl(cmd)
         finally:
             if capture_proc is not None:
                 capture_proc.send_signal(signal.SIGINT)
@@ -223,6 +247,10 @@ def main() -> None:
             failure_path.parent.mkdir(parents=True, exist_ok=True)
             failure_path.write_text("\n".join(failure_entries), encoding="utf-8")
         raise SystemExit(f"共有 {failures} 次请求失败。")
+    if args.cmd_file is not None and cmd_lines:
+        cmd_path = Path(args.cmd_file)
+        cmd_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd_path.write_text("\n".join(cmd_lines), encoding="utf-8")
 
 
 if __name__ == "__main__":
