@@ -112,7 +112,6 @@ class EntryNode:
         self.variant_by_path: Dict[int, int] = {
             path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
-        self._tunnel_mode = False
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         # 连接所有中继路径
@@ -220,6 +219,7 @@ class EntryNode:
         proxy_buffer = bytearray()
         proxy_target_sent = False
         tunnel_mode = False
+        tunnel_mode_flag = [False]
         bytes_from_client = 0
         bytes_to_client = [0]
         close_after_response = [False]
@@ -231,13 +231,13 @@ class EntryNode:
             self._window_task = asyncio.create_task(self.start_window_loop())
         self._next_down_seq = 0
         self._pending_down = {}
-        self._tunnel_mode = False
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(
                 path_conns,
                 writer,
                 fragment_buffer,
+                tunnel_mode_flag,
                 bytes_to_client,
                 close_after_response,
                 expected_response_len,
@@ -278,7 +278,7 @@ class EntryNode:
                         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         await writer.drain()
                         tunnel_mode = True
-                        self._tunnel_mode = True
+                        tunnel_mode_flag[0] = True
                     else:
                         await self.send_chunk(prefix + rewritten + body, path_conns)
                     proxy_target_sent = True
@@ -292,11 +292,23 @@ class EntryNode:
         finally:
             downlink_task.cancel()
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except (ConnectionResetError, BrokenPipeError):
+                LOGGER.info("客户端连接已重置 %s", addr)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.debug("客户端关闭等待异常 %s: %s", addr, exc)
             self._downlink_state = None
             for _, path_writer in path_conns:
                 path_writer.close()
-                await path_writer.wait_closed()
+                try:
+                    await path_writer.wait_closed()
+                except (ConnectionResetError, BrokenPipeError):
+                    LOGGER.debug("中继连接已重置 %s", addr)
+                except Exception as exc:
+                    LOGGER.debug("中继关闭等待异常 %s: %s", addr, exc)
             LOGGER.info(
                 "代理连接关闭 %s，收到 %s 字节，返回 %s 字节",
                 addr,
@@ -361,53 +373,58 @@ class EntryNode:
         return (host, port), rewritten, None, False
 
     async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
-        # 将上行 payload 分片并发送
-        seq = self.seq_counter
-        self.seq_counter += 1
-        remaining = data
-        fragments: List[tuple[int, bytes]] = []
+        # 将上行 payload 分片并流式发送
+        remaining = memoryview(data)
+        max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
         while remaining:
-            # 路径调度 + 按路径目标分布选择分片长度
-            path_id = self.scheduler.choose_path()
-            params = self.behavior.params_by_path[path_id]
-            target_len = len(remaining) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
-            piece = remaining[:target_len]
-            remaining = remaining[target_len:]
-            fragments.append((path_id, piece))
-            self.behavior.note_real_bytes(path_id, len(piece))
-        total = len(fragments)
-        for frag_id, (path_id, payload) in enumerate(fragments):
-            # 为每个分片构建帧并发送
-            family_id = self.family_by_path.get(path_id, 1)
-            variant_id = self.variant_by_path.get(path_id, 0)
-            frame = Frame(
-                session_id=self.session_id,
-                seq=seq,
-                direction=DIR_UP,
-                path_id=path_id,
-                window_id=self.window_id,
-                proto_id=family_id,
-                flags=FLAG_FRAGMENT,
-                frag_id=frag_id,
-                frag_total=total,
-                payload=payload,
-            )
-            if self.config.enable_obfuscation:
-                frame = self.proto.apply(frame, family_id, variant_id)
-                frame = self.proto.encode_payload(frame, family_id, variant_id)
-            self.scheduler.mark_sent(path_id, seq)
-            await self.behavior.pace(path_id, len(payload))
-            jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
-            if self.behavior.params_by_path[path_id].enable_jitter:
-                await asyncio.sleep(jitter_ms / 1000 * random.random())
-            _, writer = path_conns[path_id]
-            writer.write(frame.encode())
-            await writer.drain()
-            if self.behavior.update_burst(path_id):
-                template = frame
-                for padding in self.behavior.make_padding_frames(template):
-                    writer.write(padding.encode())
-                    await writer.drain()
+            chunk = remaining[:max_chunk]
+            remaining = remaining[len(chunk) :]
+            seq = self.seq_counter
+            self.seq_counter += 1
+            fragments: List[tuple[int, bytes]] = []
+            pending = bytes(chunk)
+            while pending:
+                # 路径调度 + 按路径目标分布选择分片长度
+                path_id = self.scheduler.choose_path()
+                params = self.behavior.params_by_path[path_id]
+                target_len = len(pending) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
+                piece = pending[:target_len]
+                pending = pending[target_len:]
+                fragments.append((path_id, piece))
+                self.behavior.note_real_bytes(path_id, len(piece))
+            total = len(fragments)
+            for frag_id, (path_id, payload) in enumerate(fragments):
+                # 为每个分片构建帧并发送
+                family_id = self.family_by_path.get(path_id, 1)
+                variant_id = self.variant_by_path.get(path_id, 0)
+                frame = Frame(
+                    session_id=self.session_id,
+                    seq=seq,
+                    direction=DIR_UP,
+                    path_id=path_id,
+                    window_id=self.window_id,
+                    proto_id=family_id,
+                    flags=FLAG_FRAGMENT,
+                    frag_id=frag_id,
+                    frag_total=total,
+                    payload=payload,
+                )
+                if self.config.enable_obfuscation:
+                    frame = self.proto.apply(frame, family_id, variant_id)
+                    frame = self.proto.encode_payload(frame, family_id, variant_id)
+                self.scheduler.mark_sent(path_id, seq)
+                await self.behavior.pace(path_id, len(payload))
+                jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
+                if self.behavior.params_by_path[path_id].enable_jitter:
+                    await asyncio.sleep(jitter_ms / 1000 * random.random())
+                _, writer = path_conns[path_id]
+                writer.write(frame.encode())
+                await writer.drain()
+                if self.behavior.update_burst(path_id):
+                    template = frame
+                    for padding in self.behavior.make_padding_frames(template):
+                        writer.write(padding.encode())
+                        await writer.drain()
 
     def _reset_missing_timer(self) -> None:
         candidates = [
@@ -489,6 +506,7 @@ class EntryNode:
         path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
+        tunnel_mode_flag: List[bool],
         bytes_to_client: List[int],
         close_after_response: List[bool],
         expected_response_len: List[int | None],
@@ -503,6 +521,7 @@ class EntryNode:
                     path_id,
                     client_writer,
                     fragment_buffer,
+                    tunnel_mode_flag,
                     bytes_to_client,
                     close_after_response,
                     expected_response_len,
@@ -525,6 +544,7 @@ class EntryNode:
         path_id: int,
         client_writer: asyncio.StreamWriter,
         fragment_buffer: FragmentBuffer,
+        tunnel_mode_flag: List[bool],
         bytes_to_client: List[int],
         close_after_response: List[bool],
         expected_response_len: List[int | None],
@@ -561,7 +581,7 @@ class EntryNode:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                if self._tunnel_mode:
+                if tunnel_mode_flag[0]:
                     await self.forward_tunnel_downlink(
                         payload,
                         client_writer,
@@ -583,7 +603,7 @@ class EntryNode:
                     frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)
                 ):
                     frame = self.proto.decode_payload(frame)
-                if self._tunnel_mode:
+                if tunnel_mode_flag[0]:
                     await self.forward_tunnel_downlink(
                         frame.payload,
                         client_writer,

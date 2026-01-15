@@ -136,6 +136,8 @@ async def bridge(
     direction: str,
 ) -> None:
     # 双向转发：模拟丢包/延迟并记录 trace
+    last_log_ts = time.time()
+    bytes_since_log = 0
     try:
         while True:
             data = await reader.read(4096)
@@ -145,12 +147,23 @@ async def bridge(
                 trace.feed(data, direction)
             if counter is not None:
                 counter.note(direction, len(data))
+                bytes_since_log += len(data)
             if random.random() < config.loss_rate:
                 continue
             delay = config.base_delay_ms + random.randint(0, config.jitter_ms)
             await asyncio.sleep(delay / 1000)
             dest_writer.write(data)
             await dest_writer.drain()
+            if counter is not None:
+                now = time.time()
+                if bytes_since_log >= 262144 or now - last_log_ts >= 2:
+                    LOGGER.info(
+                        "中继转发 %s 方向累计 %s 字节",
+                        direction,
+                        counter.up_bytes if direction == "up" else counter.down_bytes,
+                    )
+                    last_log_ts = now
+                    bytes_since_log = 0
     except ConnectionResetError:
         LOGGER.warning("转发链路发生连接重置")
     finally:
@@ -163,8 +176,14 @@ async def bridge(
         # 关闭双向连接
         writer.close()
         dest_writer.close()
-        await writer.wait_closed()
-        await dest_writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            LOGGER.debug("入口侧关闭时连接已重置")
+        try:
+            await dest_writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError):
+            LOGGER.debug("出口侧关闭时连接已重置")
 
 
 async def handle_entry(
