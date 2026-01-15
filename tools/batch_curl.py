@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import urlparse
 from pathlib import Path
 
 
@@ -60,9 +61,7 @@ def run_curl(url: str, proxy: str, timeout: int) -> int:
     return subprocess.call(cmd)
 
 
-def start_capture(base_dir: Path) -> subprocess.Popen:
-    run_id = uuid.uuid4().hex[:8]
-    out_dir = base_dir / run_id
+def start_capture(out_dir: Path) -> subprocess.Popen:
     cmd = [
         sys.executable,
         "-m",
@@ -73,6 +72,22 @@ def start_capture(base_dir: Path) -> subprocess.Popen:
     return subprocess.Popen(cmd)
 
 
+def url_label(url: str) -> str:
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    host = parsed.netloc or parsed.path
+    safe = []
+    for ch in host:
+        safe.append(ch if ch.isalnum() else "_")
+    return "".join(safe).strip("_") or "url"
+
+
+def move_pcap_files(run_dir: Path, base_dir: Path, label: str) -> None:
+    for path in run_dir.glob("*.pcap"):
+        target = base_dir / f"{label}_{path.stem}.pcap"
+        path.replace(target)
+    run_dir.rmdir()
+
+
 def main() -> None:
     args = parse_args()
     urls = read_urls(Path(args.input))
@@ -81,17 +96,26 @@ def main() -> None:
     if args.times < 1:
         raise SystemExit("--times 必须 >= 1")
     failures = 0
+    url_counts: dict[str, int] = {}
     for url in urls:
         for _ in range(args.times):
             capture_proc = None
+            run_dir = None
             if args.pcap_dir is not None:
-                capture_proc = start_capture(Path(args.pcap_dir))
+                run_id = uuid.uuid4().hex[:8]
+                run_dir = Path(args.pcap_dir) / run_id
+                capture_proc = start_capture(run_dir)
                 if args.pcap_wait > 0:
                     time.sleep(args.pcap_wait)
             code = run_curl(url, args.proxy, args.timeout)
             if capture_proc is not None:
                 capture_proc.terminate()
                 capture_proc.wait(timeout=5)
+                if run_dir is not None:
+                    count = url_counts.get(url, 0) + 1
+                    url_counts[url] = count
+                    label = f"{url_label(url)}_{count}"
+                    move_pcap_files(run_dir, Path(args.pcap_dir), label)
             if code != 0:
                 failures += 1
             if args.sleep > 0:
