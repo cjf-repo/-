@@ -23,6 +23,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=20, help="curl 超时秒数")
     parser.add_argument("--sleep", type=float, default=0.0, help="每次访问间隔秒数")
     parser.add_argument(
+        "--user-agent",
+        default=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        help="curl User-Agent（默认模拟浏览器）",
+    )
+    parser.add_argument(
+        "--follow-redirects",
+        action="store_true",
+        default=True,
+        help="跟随 301/302 重定向（默认启用）",
+    )
+    parser.add_argument(
+        "--no-follow-redirects",
+        action="store_false",
+        dest="follow_redirects",
+        help="关闭重定向跟随",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="允许不安全的 HTTPS 证书（等价于 curl -k）",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="保存响应内容的目录（默认不保存）",
+    )
+    parser.add_argument(
         "--pcap-dir",
         default=None,
         help="每次请求单独抓包时的输出目录（默认不单独抓包）",
@@ -46,18 +77,36 @@ def read_urls(path: Path) -> list[str]:
     return urls
 
 
-def run_curl(url: str, proxy: str, timeout: int) -> int:
+def run_curl(
+    url: str,
+    proxy: str,
+    timeout: int,
+    *,
+    user_agent: str,
+    follow_redirects: bool,
+    insecure: bool,
+    output_path: Path | None,
+) -> int:
     cmd = [
         "curl",
         "-sS",
-        "-o",
-        "/dev/null",
         "--proxy",
         proxy,
         "--max-time",
         str(timeout),
+        "-A",
+        user_agent,
         url,
     ]
+    if follow_redirects:
+        cmd.insert(1, "-L")
+    if insecure:
+        cmd.insert(1, "-k")
+    if output_path is None:
+        cmd.extend(["-o", "/dev/null"])
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["-o", str(output_path)])
     return subprocess.call(cmd)
 
 
@@ -99,23 +148,34 @@ def main() -> None:
     url_counts: dict[str, int] = {}
     for url in urls:
         for _ in range(args.times):
+            count = url_counts.get(url, 0) + 1
             capture_proc = None
             run_dir = None
+            output_path = None
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
                 capture_proc = start_capture(run_dir)
                 if args.pcap_wait > 0:
                     time.sleep(args.pcap_wait)
-            code = run_curl(url, args.proxy, args.timeout)
+            if args.output_dir is not None:
+                output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
+            code = run_curl(
+                url,
+                args.proxy,
+                args.timeout,
+                user_agent=args.user_agent,
+                follow_redirects=args.follow_redirects,
+                insecure=args.insecure,
+                output_path=output_path,
+            )
             if capture_proc is not None:
                 capture_proc.terminate()
                 capture_proc.wait(timeout=5)
                 if run_dir is not None:
-                    count = url_counts.get(url, 0) + 1
-                    url_counts[url] = count
                     label = f"{url_label(url)}_{count}"
                     move_pcap_files(run_dir, Path(args.pcap_dir), label)
+            url_counts[url] = count
             if code != 0:
                 failures += 1
             if args.sleep > 0:
