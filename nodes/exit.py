@@ -93,8 +93,8 @@ class ExitNode:
             adaptive_proto=config.adaptive_proto,
         )
         # 分片缓冲与路径 writer
-        self.fragment_buffer = FragmentBuffer()
-        self.path_writers: Dict[int, asyncio.StreamWriter] = {}
+        self._fragment_buffers: Dict[int, FragmentBuffer] = {}
+        self._path_writers: Dict[int, Dict[int, asyncio.StreamWriter]] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
         self._server_locks: Dict[int, asyncio.Lock] = {}
@@ -130,17 +130,25 @@ class ExitNode:
         LOGGER.info("中继节点已连接 %s", addr)
         if self._window_task is None:
             self._window_task = asyncio.create_task(self.start_window_loop())
+        session_id: int | None = None
+        path_id: int | None = None
         try:
             while True:
                 frame = await Frame.read_from(reader)
-                self.path_writers[frame.path_id] = writer
+                session_id = frame.session_id
+                path_id = frame.path_id
+                session_writers = self._path_writers.setdefault(session_id, {})
+                session_writers[path_id] = writer
                 if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_ACK):
                     continue
                 if self.config.enable_obfuscation:
                     frame = self.proto.decode_payload(frame)
                 # 处理分片或完整 payload
                 if frame.flags & FLAG_FRAGMENT:
-                    complete, payload = self.fragment_buffer.add(frame)
+                    fragment_buffer = self._fragment_buffers.setdefault(
+                        frame.session_id, FragmentBuffer()
+                    )
+                    complete, payload = fragment_buffer.add(frame)
                     if not complete:
                         continue
                     await self.forward_to_server(frame, payload)
@@ -152,10 +160,20 @@ class ExitNode:
             LOGGER.info("中继节点已断开 %s", addr)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
             LOGGER.debug("中继连接已关闭 %s: %s", addr, exc)
+        finally:
+            if session_id is not None and path_id is not None:
+                session_writers = self._path_writers.get(session_id)
+                if session_writers and session_writers.get(path_id) is writer:
+                    session_writers.pop(path_id, None)
+                if session_writers is not None and not session_writers:
+                    self._path_writers.pop(session_id, None)
+                    self._fragment_buffers.pop(session_id, None)
+                    self.close_proxy_session(session_id)
 
     async def send_ack(self, frame: Frame) -> None:
         # 回发 ACK
-        writer = self.path_writers.get(frame.path_id)
+        session_writers = self._path_writers.get(frame.session_id, {})
+        writer = session_writers.get(frame.path_id)
         if not writer or writer.is_closing():
             return
         ack_frame = Frame(
@@ -175,7 +193,7 @@ class ExitNode:
             await writer.drain()
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
             LOGGER.debug("ACK 发送失败 path %s: %s", frame.path_id, exc)
-            self.path_writers.pop(frame.path_id, None)
+            session_writers.pop(frame.path_id, None)
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
         session_id = frame.session_id
@@ -238,6 +256,8 @@ class ExitNode:
     def close_proxy_session(self, session_id: int) -> None:
         # 代理模式下结束会话：关闭与上游和中继的连接
         conn = self._server_conns.pop(session_id, None)
+        self._server_targets.pop(session_id, None)
+        self._server_tunnels.pop(session_id, None)
         self._down_seq_counter.pop(session_id, None)
         self._server_locks.pop(session_id, None)
         if conn:
@@ -352,7 +372,8 @@ class ExitNode:
             fragments: List[tuple[int, bytes]] = []
             pending = bytes(chunk)
             while pending:
-                available_paths = list(self.path_writers.keys())
+                session_writers = self._path_writers.get(frame.session_id, {})
+                available_paths = list(session_writers.keys())
                 if not available_paths:
                     self._down_seq_counter[frame.session_id] = seq
                     return
@@ -368,7 +389,7 @@ class ExitNode:
                 self.behavior.note_real_bytes(path_id, len(piece))
             total = len(fragments)
             for frag_id, (path_id, payload) in enumerate(fragments):
-                writer = self.path_writers.get(path_id)
+                writer = session_writers.get(path_id)
                 if not writer:
                     continue
                 family_id = self.family_by_path.get(path_id, 1)
@@ -397,7 +418,7 @@ class ExitNode:
                     await writer.drain()
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
                     LOGGER.debug("下行发送失败 path %s: %s", path_id, exc)
-                    self.path_writers.pop(path_id, None)
+                    session_writers.pop(path_id, None)
                     continue
                 if self.behavior.update_burst(path_id):
                     template = out_frame
@@ -407,7 +428,7 @@ class ExitNode:
                             await writer.drain()
                         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
                             LOGGER.debug("填充发送失败 path %s: %s", path_id, exc)
-                            self.path_writers.pop(path_id, None)
+                            session_writers.pop(path_id, None)
                             break
             seq += 1
         self._down_seq_counter[frame.session_id] = seq
