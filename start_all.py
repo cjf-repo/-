@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import sys
 import uuid
 
@@ -13,6 +14,7 @@ from config import DEFAULT_CONFIG
 async def run() -> None:
     # 管理子进程列表
     processes = []
+    stop_event = asyncio.Event()
     python = sys.executable
     # 支持环境变量覆盖 run_id 与输出目录
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
@@ -81,15 +83,19 @@ async def run() -> None:
         processes.append(client_proc)
 
     # 等待客户端完成后回收子进程
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+
     if client_proc is not None:
-        await client_proc.wait()
+        done, pending = await asyncio.wait(
+            {asyncio.create_task(client_proc.wait()), asyncio.create_task(stop_event.wait())},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
     else:
-        try:
-            # 代理模式下保持运行，等待用户手动停止
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            pass
+        await stop_event.wait()
     for proc in processes:
         if proc.returncode is None:
             proc.terminate()
