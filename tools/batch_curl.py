@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="启动抓包后等待秒数，避免丢首包",
     )
+    parser.add_argument(
+        "--failures-file",
+        default=None,
+        help="保存失败请求列表的文件路径（默认不保存）",
+    )
     return parser.parse_args()
 
 
@@ -156,6 +161,7 @@ def main() -> None:
     if args.concurrency < 1:
         raise SystemExit("--concurrency 必须 >= 1")
     failures = 0
+    failure_entries: list[str] = []
     tasks: list[tuple[str, int]] = []
     for url in urls:
         for count in range(1, args.times + 1):
@@ -199,7 +205,12 @@ def main() -> None:
             code = future.result()
             if code != 0:
                 failures += 1
+                failure_entries.append(f"{url}\t{count}")
     if failures:
+        if args.failures_file is not None:
+            failure_path = Path(args.failures_file)
+            failure_path.parent.mkdir(parents=True, exist_ok=True)
+            failure_path.write_text("\n".join(failure_entries), encoding="utf-8")
         raise SystemExit(f"共有 {failures} 次请求失败。")
 
 
