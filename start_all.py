@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import signal
 import sys
+import time
 import uuid
+from pathlib import Path
 
 from config import DEFAULT_CONFIG
 
@@ -13,38 +17,97 @@ from config import DEFAULT_CONFIG
 async def run() -> None:
     # 管理子进程列表
     processes = []
+    stream_tasks: list[asyncio.Task] = []
+    stop_event = asyncio.Event()
     python = sys.executable
     # 支持环境变量覆盖 run_id 与输出目录
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
+    json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
+    Path(json_log_path).parent.mkdir(parents=True, exist_ok=True)
+    json_log_file = open(json_log_path, "a", encoding="utf-8")
+    json_lock = asyncio.Lock()
+
+    async def read_stream(stream: asyncio.StreamReader, *, source: str, is_err: bool) -> None:
+        target = sys.stderr if is_err else sys.stdout
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            text = line.decode(errors="replace").rstrip("\n")
+            target.write(text + "\n")
+            target.flush()
+            payload = {
+                "ts": time.time(),
+                "source": source,
+                "stream": "stderr" if is_err else "stdout",
+                "message": text,
+            }
+            async with json_lock:
+                json_log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                json_log_file.flush()
     # 启动目标服务（外部真实服务模式可跳过）
     if os.environ.get("EXTERNAL_SERVER") != "1":
-        processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.server", env=base_env))
+        server_proc = await asyncio.create_subprocess_exec(
+            python,
+            "-m",
+            "nodes.server",
+            env=base_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        processes.append(server_proc)
+        stream_tasks.append(asyncio.create_task(read_stream(server_proc.stdout, source="server", is_err=False)))
+        stream_tasks.append(asyncio.create_task(read_stream(server_proc.stderr, source="server", is_err=True)))
         await asyncio.sleep(0.2)
     # 启动出口节点
-    processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.exit", env=base_env))
+    exit_proc = await asyncio.create_subprocess_exec(
+        python,
+        "-m",
+        "nodes.exit",
+        env=base_env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    processes.append(exit_proc)
+    stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stdout, source="exit", is_err=False)))
+    stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stderr, source="exit", is_err=True)))
     await asyncio.sleep(0.2)
     # 启动中继节点
     for port in DEFAULT_CONFIG.middle_ports:
         path_id = DEFAULT_CONFIG.middle_ports.index(port)
-        processes.append(
-            await asyncio.create_subprocess_exec(
-                python,
-                "-m",
-                "nodes.middle",
-                "--listen",
-                str(port),
-                "--exit-port",
-                str(DEFAULT_CONFIG.exit_port),
-                "--path-id",
-                str(path_id),
-                env=base_env,
-            )
+        middle_proc = await asyncio.create_subprocess_exec(
+            python,
+            "-m",
+            "nodes.middle",
+            "--listen",
+            str(port),
+            "--exit-port",
+            str(DEFAULT_CONFIG.exit_port),
+            "--path-id",
+            str(path_id),
+            env=base_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        processes.append(middle_proc)
+        source = f"middle_{path_id}"
+        stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stdout, source=source, is_err=False)))
+        stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stderr, source=source, is_err=True)))
     await asyncio.sleep(0.2)
     # 启动入口节点
-    processes.append(await asyncio.create_subprocess_exec(python, "-m", "nodes.entry", env=base_env))
+    entry_proc = await asyncio.create_subprocess_exec(
+        python,
+        "-m",
+        "nodes.entry",
+        env=base_env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    processes.append(entry_proc)
+    stream_tasks.append(asyncio.create_task(read_stream(entry_proc.stdout, source="entry", is_err=False)))
+    stream_tasks.append(asyncio.create_task(read_stream(entry_proc.stderr, source="entry", is_err=True)))
     await asyncio.sleep(0.5)
     # 可选：启动抓包
     capture_proc = None
@@ -63,8 +126,12 @@ async def run() -> None:
             "--middle-ports",
             ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports]),
             env=base_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         processes.append(capture_proc)
+        stream_tasks.append(asyncio.create_task(read_stream(capture_proc.stdout, source="capture_pcap", is_err=False)))
+        stream_tasks.append(asyncio.create_task(read_stream(capture_proc.stderr, source="capture_pcap", is_err=True)))
     # 启动客户端应用（代理模式下由浏览器/curl 触发）
     client_proc = None
     if os.environ.get("PROXY_MODE") != "1":
@@ -77,23 +144,35 @@ async def run() -> None:
             "--interval",
             "0.5",
             env=base_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         processes.append(client_proc)
+        stream_tasks.append(asyncio.create_task(read_stream(client_proc.stdout, source="client_app", is_err=False)))
+        stream_tasks.append(asyncio.create_task(read_stream(client_proc.stderr, source="client_app", is_err=True)))
 
     # 等待客户端完成后回收子进程
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+
     if client_proc is not None:
-        await client_proc.wait()
+        done, pending = await asyncio.wait(
+            {asyncio.create_task(client_proc.wait()), asyncio.create_task(stop_event.wait())},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
     else:
-        try:
-            # 代理模式下保持运行，等待用户手动停止
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            pass
+        await stop_event.wait()
     for proc in processes:
         if proc.returncode is None:
             proc.terminate()
     await asyncio.gather(*[proc.wait() for proc in processes], return_exceptions=True)
+    for task in stream_tasks:
+        task.cancel()
+    await asyncio.gather(*stream_tasks, return_exceptions=True)
+    json_log_file.close()
 
 
 if __name__ == "__main__":
