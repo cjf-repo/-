@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import random
+import socket
 import time
 import struct
 from typing import Dict, List
@@ -113,7 +114,11 @@ class ExitNode:
 
     async def connect_server(self, host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         # 连接目标服务
-        reader, writer = await asyncio.open_connection(host, port)
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+        except (OSError, socket.gaierror) as exc:
+            LOGGER.warning("连接目标服务失败 %s:%s: %s", host, port, exc)
+            raise
         LOGGER.info("已连接到目标服务 %s:%s", host, port)
         return reader, writer
 
@@ -186,7 +191,13 @@ class ExitNode:
                 target, payload, tunnel_mode = self.extract_target(payload, target)
                 self._server_targets[session_id] = target
                 self._server_tunnels[session_id] = tunnel_mode
-                self._server_conns[session_id] = await self.connect_server(*target)
+                try:
+                    self._server_conns[session_id] = await self.connect_server(*target)
+                except OSError:
+                    self._server_targets.pop(session_id, None)
+                    self._server_tunnels.pop(session_id, None)
+                    self._server_conns.pop(session_id, None)
+                    return
             else:
                 payload = self.strip_target_prefix(payload)
             reader, writer = self._server_conns[session_id]
@@ -198,14 +209,19 @@ class ExitNode:
                 await writer.drain()
             except (ConnectionResetError, ConnectionAbortedError):
                 self._server_conns.pop(session_id, None)
-                reader, writer = await self.connect_server(*target)
+                try:
+                    reader, writer = await self.connect_server(*target)
+                except OSError:
+                    self._server_targets.pop(session_id, None)
+                    self._server_tunnels.pop(session_id, None)
+                    return
                 self._server_conns[session_id] = (reader, writer)
                 writer.write(payload)
                 await writer.drain()
             if self.config.server_mode == "echo":
                 response = await reader.readexactly(len(payload))
             else:
-                response = await self.read_response_stream(reader)
+                response = await self.read_http_response(reader)
         LOGGER.info(
             "上游请求 %s:%s 发送 %s 字节，收到 %s 字节",
             target[0],
@@ -266,13 +282,64 @@ class ExitNode:
         chunks = bytearray()
         while True:
             try:
-                data = await asyncio.wait_for(reader.read(4096), timeout=1.0)
+                data = await asyncio.wait_for(reader.read(4096), timeout=3.0)
             except asyncio.TimeoutError:
                 break
             if not data:
                 break
             chunks.extend(data)
         return bytes(chunks)
+
+    async def read_chunked_body(self, reader: asyncio.StreamReader) -> bytes:
+        body = bytearray()
+        while True:
+            size_line = await reader.readuntil(b"\r\n")
+            body.extend(size_line)
+            size_text = size_line.strip().split(b";", 1)[0]
+            try:
+                size = int(size_text, 16)
+            except ValueError:
+                break
+            if size == 0:
+                while True:
+                    trailer_line = await reader.readuntil(b"\r\n")
+                    body.extend(trailer_line)
+                    if trailer_line == b"\r\n":
+                        break
+                break
+            chunk = await reader.readexactly(size)
+            body.extend(chunk)
+            body.extend(await reader.readexactly(2))
+        return bytes(body)
+
+    async def read_http_response(self, reader: asyncio.StreamReader) -> bytes:
+        try:
+            header_bytes = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5.0)
+        except asyncio.IncompleteReadError as exc:
+            return exc.partial
+        except (asyncio.TimeoutError, asyncio.LimitOverrunError):
+            return await self.read_response_stream(reader)
+        headers_text = header_bytes.decode("iso-8859-1", errors="replace")
+        headers: Dict[str, str] = {}
+        for line in headers_text.split("\r\n")[1:]:
+            if not line:
+                break
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+        content_length = headers.get("content-length")
+        if content_length is not None:
+            try:
+                length = int(content_length)
+            except ValueError:
+                length = None
+            if length is not None:
+                body = await reader.readexactly(length)
+                return header_bytes + body
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            body = await self.read_chunked_body(reader)
+            return header_bytes + body
+        return header_bytes + await self.read_response_stream(reader)
 
     async def send_downlink(self, frame: Frame, data: bytes) -> None:
         # 下行分片并流式发送
