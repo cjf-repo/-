@@ -96,7 +96,7 @@ class ExitNode:
         self.path_writers: Dict[int, asyncio.StreamWriter] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
-        self._server_lock = asyncio.Lock()
+        self._server_locks: Dict[int, asyncio.Lock] = {}
         self._server_conns: Dict[int, tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._server_targets: Dict[int, tuple[str, int]] = {}
         self._server_tunnels: Dict[int, bool] = {}
@@ -173,9 +173,13 @@ class ExitNode:
             self.path_writers.pop(frame.path_id, None)
 
     async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
-        # 与上游服务串行交互，避免 readexactly 冲突
-        async with self._server_lock:
-            session_id = frame.session_id
+        session_id = frame.session_id
+        # 与上游服务按会话串行交互，避免 readexactly 冲突
+        lock = self._server_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._server_locks[session_id] = lock
+        async with lock:
             target = self._server_targets.get(session_id, (self.config.server_host, self.config.server_port))
             tunnel_mode = self._server_tunnels.get(session_id, False)
             if session_id not in self._server_conns:
@@ -219,6 +223,7 @@ class ExitNode:
         # 代理模式下结束会话：关闭与上游和中继的连接
         conn = self._server_conns.pop(session_id, None)
         self._down_seq_counter.pop(session_id, None)
+        self._server_locks.pop(session_id, None)
         if conn:
             reader, writer = conn
             writer.close()
