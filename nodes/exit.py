@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import random
+import socket
 import time
 import struct
 from typing import Dict, List
@@ -113,7 +114,11 @@ class ExitNode:
 
     async def connect_server(self, host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         # 连接目标服务
-        reader, writer = await asyncio.open_connection(host, port)
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+        except (OSError, socket.gaierror) as exc:
+            LOGGER.warning("连接目标服务失败 %s:%s: %s", host, port, exc)
+            raise
         LOGGER.info("已连接到目标服务 %s:%s", host, port)
         return reader, writer
 
@@ -186,7 +191,13 @@ class ExitNode:
                 target, payload, tunnel_mode = self.extract_target(payload, target)
                 self._server_targets[session_id] = target
                 self._server_tunnels[session_id] = tunnel_mode
-                self._server_conns[session_id] = await self.connect_server(*target)
+                try:
+                    self._server_conns[session_id] = await self.connect_server(*target)
+                except OSError:
+                    self._server_targets.pop(session_id, None)
+                    self._server_tunnels.pop(session_id, None)
+                    self._server_conns.pop(session_id, None)
+                    return
             else:
                 payload = self.strip_target_prefix(payload)
             reader, writer = self._server_conns[session_id]
@@ -198,7 +209,12 @@ class ExitNode:
                 await writer.drain()
             except (ConnectionResetError, ConnectionAbortedError):
                 self._server_conns.pop(session_id, None)
-                reader, writer = await self.connect_server(*target)
+                try:
+                    reader, writer = await self.connect_server(*target)
+                except OSError:
+                    self._server_targets.pop(session_id, None)
+                    self._server_tunnels.pop(session_id, None)
+                    return
                 self._server_conns[session_id] = (reader, writer)
                 writer.write(payload)
                 await writer.drain()
