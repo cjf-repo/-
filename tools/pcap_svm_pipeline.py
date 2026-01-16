@@ -516,12 +516,27 @@ def main() -> None:
     labels = [row["label"] for row in rows]
     feature_matrix = np.array([[row[f"f{i}"] for i in range(feature_len)] for row in rows])
 
+    unique_labels = sorted(set(labels))
+    if len(unique_labels) < 2:
+        raise RuntimeError("分类类别少于 2 个，无法进行 SVM 训练。")
+    if len(labels) < 2:
+        raise RuntimeError("样本数量不足（<2），无法进行训练/测试划分。")
+
+    test_count = max(1, int(round(len(labels) * args.test_size)))
+    stratify_labels = labels
+    if test_count < len(unique_labels):
+        print(
+            "Warning: 测试集样本数不足以覆盖所有类别，"
+            "已自动关闭 stratify（可通过减小类别数或增大样本数修复）。"
+        )
+        stratify_labels = None
+
     x_train, x_test, y_train, y_test = train_test_split(
         feature_matrix,
         labels,
         test_size=args.test_size,
         random_state=args.random_state,
-        stratify=labels,
+        stratify=stratify_labels,
     )
 
     scaler = StandardScaler()
