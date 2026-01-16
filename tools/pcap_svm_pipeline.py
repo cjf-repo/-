@@ -64,6 +64,15 @@ def parse_args() -> argparse.Namespace:
         help="启用 group 目录结构 root/<group>/<label>/*.pcap",
     )
     parser.add_argument(
+        "--pcap-suffix",
+        type=str,
+        default="entry",
+        help=(
+            "过滤节点 PCAP 文件后缀（如 entry/exit/middle_0/middle_1）。"
+            "默认使用 entry，仅提取每次访问对应的入口节点流量。"
+        ),
+    )
+    parser.add_argument(
         "--kl-reference-root",
         type=Path,
         default=None,
@@ -439,7 +448,7 @@ def build_feature_vector(
     return features
 
 
-def collect_pcaps(root: Path, group_level: bool) -> list[tuple[Path, str, str]]:
+def collect_pcaps(root: Path, group_level: bool, suffix: str) -> list[tuple[Path, str, str]]:
     entries: list[tuple[Path, str, str]] = []
     if group_level:
         for group_dir in root.iterdir():
@@ -448,20 +457,22 @@ def collect_pcaps(root: Path, group_level: bool) -> list[tuple[Path, str, str]]:
             for label_dir in group_dir.iterdir():
                 if not label_dir.is_dir():
                     continue
-                for pcap in label_dir.glob("*.pcap"):
+                for pcap in label_dir.glob(f"*_{suffix}.pcap"):
                     entries.append((pcap, label_dir.name, group_dir.name))
     else:
         for label_dir in root.iterdir():
             if not label_dir.is_dir():
                 continue
-            for pcap in label_dir.glob("*.pcap"):
+            for pcap in label_dir.glob(f"*_{suffix}.pcap"):
                 entries.append((pcap, label_dir.name, "default"))
     return entries
 
 
-def build_reference_distribution(root: Path, group_level: bool, bins: list[int]) -> np.ndarray:
+def build_reference_distribution(
+    root: Path, group_level: bool, bins: list[int], suffix: str
+) -> np.ndarray:
     counts = np.zeros(len(bins) + 1)
-    for pcap, _label, _group in collect_pcaps(root, group_level):
+    for pcap, _label, _group in collect_pcaps(root, group_level, suffix):
         packets = load_pcap_packets(pcap)
         sizes = [pkt.payload_len for pkt in packets if pkt.payload_len > 0]
         counts += size_distribution(sizes, bins)
@@ -473,11 +484,15 @@ def main() -> None:
     size_bins = DEFAULT_CONFIG.size_bins
     reference = None
     if args.kl_reference_root is not None:
-        reference = build_reference_distribution(args.kl_reference_root, args.group_level, size_bins)
+        reference = build_reference_distribution(
+            args.kl_reference_root, args.group_level, size_bins, args.pcap_suffix
+        )
 
     rows = []
     feature_len = None
-    for pcap, label, group in collect_pcaps(args.pcap_root, args.group_level):
+    for pcap, label, group in collect_pcaps(
+        args.pcap_root, args.group_level, args.pcap_suffix
+    ):
         packets = load_pcap_packets(pcap)
         features = build_feature_vector(
             packets,
