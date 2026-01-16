@@ -7,7 +7,8 @@ import time
 import uuid
 import signal
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
+from typing import Iterable
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -35,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="并发请求数量（默认 1，>1 会并发执行 URL 访问）",
+    )
+    parser.add_argument(
+        "--max-pending",
+        type=int,
+        default=0,
+        help="待执行任务上限（0 表示自动 = 并发数 * 4）",
     )
     parser.add_argument(
         "--user-agent",
@@ -196,14 +203,19 @@ def main() -> None:
         raise SystemExit("--concurrency 必须 >= 1")
     if args.retry < 0:
         raise SystemExit("--retry 必须 >= 0")
+    if args.max_pending < 0:
+        raise SystemExit("--max-pending 必须 >= 0")
+    max_pending = args.max_pending or args.concurrency * 4
+    if max_pending < args.concurrency:
+        max_pending = args.concurrency
     failures = 0
     failure_entries: list[str] = []
     cmd_lines: list[str] = []
     cmd_lock = threading.Lock()
-    tasks: list[tuple[str, int]] = []
-    for url in urls:
-        for count in range(1, args.times + 1):
-            tasks.append((url, count))
+    def iter_tasks() -> Iterable[tuple[str, int]]:
+        for url in urls:
+            for count in range(1, args.times + 1):
+                yield url, count
 
     def worker(url: str, count: int) -> int:
         capture_proc = None
@@ -256,12 +268,31 @@ def main() -> None:
                 time.sleep(args.sleep)
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = [executor.submit(worker, url, count) for url, count in tasks]
-        for future in as_completed(futures):
-            code = future.result()
-            if code != 0:
-                failures += 1
-                failure_entries.append(f"{url}\t{count}")
+        task_iter = iter_tasks()
+        pending: dict[Future[int], tuple[str, int]] = {}
+
+        def submit_next() -> bool:
+            try:
+                next_task = next(task_iter)
+            except StopIteration:
+                return False
+            future = executor.submit(worker, *next_task)
+            pending[future] = next_task
+            return True
+
+        while len(pending) < max_pending and submit_next():
+            continue
+
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                url, count = pending.pop(future)
+                code = future.result()
+                if code != 0:
+                    failures += 1
+                    failure_entries.append(f"{url}\t{count}")
+                while len(pending) < max_pending and submit_next():
+                    continue
     if failures:
         if args.failures_file is not None:
             failure_path = Path(args.failures_file)
