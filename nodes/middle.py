@@ -193,12 +193,13 @@ async def handle_entry(
     exit_host: str,
     exit_port: int,
     path_id: int,
+    enable_trace: bool,
 ) -> None:
     # 处理入口连接并建立到出口的转发
     addr = writer.get_extra_info("peername")
     LOGGER.info("入口节点已连接 %s", addr)
     run_context = get_run_context(DEFAULT_CONFIG)
-    trace = TraceWriter(run_context, path_id)
+    trace = TraceWriter(run_context, path_id) if enable_trace else None
     counter = TrafficCounter()
     exit_reader, exit_writer = await asyncio.open_connection(exit_host, exit_port)
     try:
@@ -211,7 +212,8 @@ async def handle_entry(
             if isinstance(result, Exception):
                 LOGGER.debug("中继处理连接时捕获异常: %s", result)
     finally:
-        trace.close()
+        if trace is not None:
+            trace.close()
 
 
 async def main() -> None:
@@ -225,8 +227,17 @@ async def main() -> None:
         loss_rate=args.loss,
     )
     path_id = args.path_id if args.path_id >= 0 else DEFAULT_CONFIG.middle_ports.index(args.listen)
+    enable_trace = DEFAULT_CONFIG.enable_trace
     server = await asyncio.start_server(
-        lambda r, w: handle_entry(r, w, config, args.exit_host, args.exit_port, path_id),
+        lambda r, w: handle_entry(
+            r,
+            w,
+            config,
+            args.exit_host,
+            args.exit_port,
+            path_id,
+            enable_trace,
+        ),
         "127.0.0.1",
         args.listen,
     )
