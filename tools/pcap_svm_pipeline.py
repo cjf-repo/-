@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -12,6 +13,10 @@ from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from config import DEFAULT_CONFIG
 from frames import HEADER_STRUCT, FLAG_PADDING
