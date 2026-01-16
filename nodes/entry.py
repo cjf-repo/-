@@ -6,11 +6,11 @@ import json
 import random
 import struct
 import time
-from urllib.parse import urlsplit
 from dataclasses import replace
 from typing import Dict, List
+from urllib.parse import urlsplit
 
-from behavior import BehaviorShaper, BehaviorParams
+from behavior import BehaviorParams, BehaviorShaper
 from config import DEFAULT_CONFIG
 from frames import (
     DIR_DOWN,
@@ -24,8 +24,8 @@ from frames import (
 )
 from logger import setup_logger
 from obfuscation import ProtoObfuscator
-from scheduler import MultiPathScheduler
 from run_context import get_run_context
+from scheduler import MultiPathScheduler
 from strategy import StrategyEngine
 
 
@@ -33,6 +33,7 @@ LOGGER = setup_logger("entry")
 ACK_STRUCT = struct.Struct("!Q")
 
 # 入口节点：接收客户端流量，分片并在多路径上发送。
+
 
 def parse_args() -> argparse.Namespace:
     # 命令行参数解析
@@ -44,9 +45,23 @@ def parse_args() -> argparse.Namespace:
 
 class EntryNode:
     def __init__(self, config=DEFAULT_CONFIG) -> None:
-        # 保存配置与上下文
         self.config = config
         self.run_context = get_run_context(config)
+
+    async def handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        session = EntrySession(self.config, self.run_context)
+        await session.handle_client(reader, writer)
+
+
+class EntrySession:
+    def __init__(self, config, run_context) -> None:
+        # 保存配置与上下文
+        self.config = config
+        self.run_context = run_context
         # 会话/窗口状态
         self.session_id = random.randint(1, 2**32 - 1)
         self.window_id = 0
@@ -149,7 +164,7 @@ class EntryNode:
                     self.behavior.update_q_dist(path_id, drift, seed=self.window_id * 100 + path_id)
             # 新窗口开始
             self.behavior.start_window(self.window_id)
-            self.proto.start_window(self.window_id, output.family_by_path, output.variant_by_path)
+            self.proto.start_window(self.window_id, self.family_by_path, self.variant_by_path)
             for path_id, stats in metrics.items():
                 # 记录窗口日志（用于离线分析）
                 behavior = output.behavior_by_path[path_id]
@@ -291,6 +306,14 @@ class EntryNode:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
             downlink_task.cancel()
+            if self._window_task is not None:
+                self._window_task.cancel()
+                try:
+                    await self._window_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    LOGGER.debug("窗口任务结束异常 %s", exc)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -644,39 +667,6 @@ class EntryNode:
             expected_response_len,
             delivered_response_len,
         )
-
-    async def forward_tunnel_downlink(
-        self,
-        payload: bytes,
-        client_writer: asyncio.StreamWriter,
-        bytes_to_client: List[int],
-    ) -> None:
-        client_writer.write(payload)
-        await client_writer.drain()
-        if self.config.proxy_mode:
-            bytes_to_client[0] += len(payload)
-
-    async def forward_tunnel_downlink(
-        self,
-        payload: bytes,
-        client_writer: asyncio.StreamWriter,
-        bytes_to_client: List[int],
-    ) -> None:
-        client_writer.write(payload)
-        await client_writer.drain()
-        if self.config.proxy_mode:
-            bytes_to_client[0] += len(payload)
-
-    async def forward_tunnel_downlink(
-        self,
-        payload: bytes,
-        client_writer: asyncio.StreamWriter,
-        bytes_to_client: List[int],
-    ) -> None:
-        client_writer.write(payload)
-        await client_writer.drain()
-        if self.config.proxy_mode:
-            bytes_to_client[0] += len(payload)
 
     async def forward_tunnel_downlink(
         self,
