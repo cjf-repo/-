@@ -201,10 +201,17 @@ async def handle_entry(
     trace = TraceWriter(run_context, path_id)
     counter = TrafficCounter()
     exit_reader, exit_writer = await asyncio.open_connection(exit_host, exit_port)
-    await asyncio.gather(
-        bridge(reader, writer, exit_reader, exit_writer, config, trace, counter, "up"),
-        bridge(exit_reader, exit_writer, reader, writer, config, None, counter, "down"),
-    )
+    try:
+        results = await asyncio.gather(
+            bridge(reader, writer, exit_reader, exit_writer, config, trace, counter, "up"),
+            bridge(exit_reader, exit_writer, reader, writer, config, None, counter, "down"),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                LOGGER.debug("中继处理连接时捕获异常: %s", result)
+    finally:
+        trace.close()
 
 
 async def main() -> None:
