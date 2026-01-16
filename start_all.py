@@ -24,10 +24,12 @@ async def run() -> None:
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
-    if os.environ.get("START_ALL_DISABLE_TRACE") == "1":
-        base_env["ENABLE_TRACE"] = "0"
-    if os.environ.get("START_ALL_CAPTURE_PCAP") is None:
-        base_env["CAPTURE_PCAP"] = "0"
+    base_env["ENABLE_TRACE"] = "0"
+    if os.environ.get("START_ALL_ENABLE_TRACE") == "1":
+        base_env["ENABLE_TRACE"] = "1"
+    base_env["CAPTURE_PCAP"] = "0"
+    if os.environ.get("START_ALL_CAPTURE_PCAP") == "1":
+        base_env["CAPTURE_PCAP"] = "1"
     json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
     Path(json_log_path).parent.mkdir(parents=True, exist_ok=True)
     json_log_file = open(json_log_path, "a", encoding="utf-8")
