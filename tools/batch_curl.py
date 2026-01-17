@@ -13,6 +13,10 @@ from typing import Iterable
 from urllib.parse import urlparse
 from pathlib import Path
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+
 from config import DEFAULT_CONFIG
 
 def parse_args() -> argparse.Namespace:
