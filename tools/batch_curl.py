@@ -7,6 +7,7 @@ import time
 import uuid
 import signal
 import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
 from typing import Iterable
 from urllib.parse import urlparse
@@ -23,6 +24,11 @@ def parse_args() -> argparse.Namespace:
         "--proxy",
         default="http://127.0.0.1:9001",
         help="代理地址（入口节点），例如 http://127.0.0.1:9001",
+    )
+    parser.add_argument(
+        "--proxy-list",
+        default=None,
+        help="多个代理地址（逗号分隔），用于并发分流，例如 http://127.0.0.1:9001,http://127.0.0.1:9011",
     )
     parser.add_argument(
         "--timeout",
@@ -86,6 +92,11 @@ def parse_args() -> argparse.Namespace:
         help="启动抓包后等待秒数，避免丢首包",
     )
     parser.add_argument(
+        "--allow-pcap-overlap",
+        action="store_true",
+        help="允许并发抓包时多个请求混合在同一节点流量中（默认不允许）",
+    )
+    parser.add_argument(
         "--failures-file",
         default=None,
         help="保存失败请求列表的文件路径（默认不保存）",
@@ -123,6 +134,16 @@ def read_urls(path: Path) -> list[str]:
             continue
         urls.append(url)
     return urls
+
+
+def parse_proxies(proxy: str, proxy_list: str | None) -> list[str]:
+    if proxy_list:
+        proxies = [item.strip() for item in proxy_list.split(",") if item.strip()]
+    else:
+        proxies = [proxy.strip()]
+    if not proxies:
+        raise SystemExit("未提供有效代理地址，请检查 --proxy 或 --proxy-list。")
+    return proxies
 
 
 def build_curl_cmd(
@@ -205,9 +226,54 @@ def main() -> None:
         raise SystemExit("--retry 必须 >= 0")
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
-    max_pending = args.max_pending or args.concurrency * 4
-    if max_pending < args.concurrency:
-        max_pending = args.concurrency
+    proxies = parse_proxies(args.proxy, args.proxy_list)
+
+    class ProxyPool:
+        def __init__(self, items: list[str]) -> None:
+            self.items = items
+            self._queue: queue.Queue[str] = queue.Queue()
+            for item in items:
+                self._queue.put(item)
+
+        def acquire(self) -> str:
+            return self._queue.get()
+
+        def release(self, proxy: str) -> None:
+            self._queue.put(proxy)
+
+    proxy_pool: ProxyPool | None = None
+    proxy_index = 0
+    proxy_select_lock = threading.Lock()
+
+    def next_proxy() -> str:
+        nonlocal proxy_index
+        with proxy_select_lock:
+            proxy = proxies[proxy_index % len(proxies)]
+            proxy_index += 1
+        return proxy
+
+    concurrency = args.concurrency
+    if args.pcap_dir is not None and not args.allow_pcap_overlap:
+        if len(proxies) == 1 and concurrency > 1:
+            print(
+                "检测到 --pcap-dir 与并发请求同时使用，为避免抓包混叠已将并发数降为 1。"
+                "如需并发，请启动多个入口并使用 --proxy-list 分流。",
+                file=sys.stderr,
+            )
+            concurrency = 1
+        else:
+            if concurrency > len(proxies):
+                print(
+                    "检测到 --pcap-dir 与并发请求同时使用，将并发数限制为代理数量以避免同一代理抓包混叠。",
+                    file=sys.stderr,
+                )
+                concurrency = len(proxies)
+            proxy_pool = ProxyPool(proxies)
+    if concurrency < 1:
+        concurrency = 1
+    max_pending = args.max_pending or concurrency * 4
+    if max_pending < concurrency:
+        max_pending = concurrency
     failures = 0
     failure_entries: list[str] = []
     cmd_lines: list[str] = []
@@ -221,7 +287,12 @@ def main() -> None:
         capture_proc = None
         run_dir = None
         output_path = None
+        proxy = ""
         try:
+            if proxy_pool is not None:
+                proxy = proxy_pool.acquire()
+            else:
+                proxy = next_proxy()
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
@@ -232,7 +303,7 @@ def main() -> None:
                 output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
             cmd = build_curl_cmd(
                 url,
-                args.proxy,
+                proxy,
                 args.timeout,
                 user_agent=args.user_agent,
                 follow_redirects=args.follow_redirects,
@@ -266,8 +337,10 @@ def main() -> None:
                 move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
             if args.sleep > 0:
                 time.sleep(args.sleep)
+            if proxy_pool is not None and proxy:
+                proxy_pool.release(proxy)
 
-    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
         task_iter = iter_tasks()
         pending: dict[Future[int], tuple[str, int]] = {}
 
