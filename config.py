@@ -78,6 +78,8 @@ class Config:
     enable_behavior: bool = True
     # 属性伪装开关（协议模板/握手/编码）
     enable_obfuscation: bool = True
+    # 中继 trace 记录开关
+    enable_trace: bool = True
 
     # ACK 超时时间
     ack_timeout_sec: float = 2.0
@@ -86,6 +88,8 @@ class Config:
     capture_pcap: bool = False
     # 抓包输出目录
     capture_dir: str | None = None
+    # batch_curl 多端口配置（如 "9001-9006" 或 "9001,9002"）
+    batch_proxy_ports: str | None = None
 
     def paths(self) -> List[PathConfig]:
         # 根据端口列表生成路径配置
@@ -141,8 +145,10 @@ def load_config_from_env() -> Config:
     config.enable_multipath = _env_bool("ENABLE_MULTIPATH", config.enable_multipath)
     config.enable_behavior = _env_bool("ENABLE_BEHAVIOR", config.enable_behavior)
     config.enable_obfuscation = _env_bool("ENABLE_OBFUSCATION", config.enable_obfuscation)
+    config.enable_trace = _env_bool("ENABLE_TRACE", config.enable_trace)
     config.capture_pcap = _env_bool("CAPTURE_PCAP", config.capture_pcap)
     config.capture_dir = os.environ.get("CAPTURE_DIR") or config.capture_dir
+    config.batch_proxy_ports = os.environ.get("BATCH_PROXY_PORTS") or config.batch_proxy_ports
     # 如提供 SEED 则固定随机种子
     seed = os.environ.get("SEED")
     if seed is not None:
