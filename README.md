@@ -184,6 +184,7 @@ python run_experiments.py
 ## 使用配置文件启动 start_all
 
 可以通过 `start_all.py --config <json>` 直接读取端口配置，避免手动设置多组环境变量。
+现在端口配置必须来自配置文件（环境变量 `CONFIG_PATH`），单独运行各节点时也需要先设置该变量。
 
 示例配置（`config_ports.json`）：
 

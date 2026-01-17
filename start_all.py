@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import signal
@@ -11,8 +12,6 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-
-from config import DEFAULT_CONFIG
 
 # 一键启动脚本：启动 server/exit/middle/entry/client。
 
@@ -27,43 +26,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config_overrides(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise SystemExit("配置文件必须是 JSON 对象。")
-    allowed_keys = {
-        "entry_host",
-        "entry_port",
-        "middle_host",
-        "middle_ports",
-        "exit_host",
-        "exit_port",
-        "server_host",
-        "server_port",
-        "server_mode",
-        "proxy_mode",
-        "capture_pcap",
-        "capture_dir",
-    }
-    overrides: dict[str, Any] = {}
-    for key, value in data.items():
-        if key not in allowed_keys:
-            continue
-        overrides[key] = value
-    if "middle_ports" in overrides:
-        middle_ports = overrides["middle_ports"]
-        if not isinstance(middle_ports, list) or not middle_ports:
-            raise SystemExit("middle_ports 必须是非空列表。")
-        overrides["middle_ports"] = [int(port) for port in middle_ports]
-    if "entry_port" in overrides:
-        overrides["entry_port"] = int(overrides["entry_port"])
-    if "exit_port" in overrides:
-        overrides["exit_port"] = int(overrides["exit_port"])
-    if "server_port" in overrides:
-        overrides["server_port"] = int(overrides["server_port"])
-    return overrides
-
-
 async def run() -> None:
     # 管理子进程列表
     processes = []
@@ -71,13 +33,17 @@ async def run() -> None:
     stop_event = asyncio.Event()
     python = sys.executable
     args = parse_args()
-    config = DEFAULT_CONFIG
-    if args.config:
-        config_path = Path(args.config)
-        if not config_path.exists():
-            raise SystemExit(f"配置文件不存在: {config_path}")
-        overrides = load_config_overrides(config_path)
-        config = replace(config, **overrides)
+    if not args.config:
+        raise SystemExit("请通过 --config 指定配置文件。")
+    config_path = Path(args.config)
+    if not config_path.exists():
+        raise SystemExit(f"配置文件不存在: {config_path}")
+    os.environ["CONFIG_PATH"] = str(config_path)
+    if "config" in sys.modules:
+        config_module = importlib.reload(sys.modules["config"])
+    else:
+        config_module = importlib.import_module("config")
+    config = config_module.DEFAULT_CONFIG
     # 支持环境变量覆盖 run_id 与输出目录
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
@@ -88,20 +54,10 @@ async def run() -> None:
     base_env["CAPTURE_PCAP"] = "0"
     if os.environ.get("START_ALL_CAPTURE_PCAP") == "1":
         base_env["CAPTURE_PCAP"] = "1"
-    if args.config:
-        base_env["ENTRY_HOST"] = config.entry_host
-        base_env["ENTRY_PORT"] = str(config.entry_port)
-        base_env["MIDDLE_HOST"] = config.middle_host
-        base_env["MIDDLE_PORTS"] = ",".join([str(port) for port in config.middle_ports])
-        base_env["EXIT_HOST"] = config.exit_host
-        base_env["EXIT_PORT"] = str(config.exit_port)
-        base_env["SERVER_HOST"] = config.server_host
-        base_env["SERVER_PORT"] = str(config.server_port)
-        base_env["SERVER_MODE"] = config.server_mode
-        base_env["PROXY_MODE"] = "1" if config.proxy_mode else "0"
-        base_env["CAPTURE_PCAP"] = "1" if config.capture_pcap else base_env["CAPTURE_PCAP"]
-        if config.capture_dir:
-            base_env["CAPTURE_DIR"] = config.capture_dir
+    base_env["CONFIG_PATH"] = str(config_path)
+    base_env["CAPTURE_PCAP"] = "1" if config.capture_pcap else base_env["CAPTURE_PCAP"]
+    if config.capture_dir:
+        base_env["CAPTURE_DIR"] = config.capture_dir
     json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
     Path(json_log_path).parent.mkdir(parents=True, exist_ok=True)
     json_log_file = open(json_log_path, "a", encoding="utf-8")
