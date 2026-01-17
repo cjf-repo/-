@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import json
 import os
+from pathlib import Path
 from typing import List
 
 # 配置模块：集中管理默认配置，并支持从环境变量加载实验参数。
@@ -122,18 +124,51 @@ def _env_str(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+def load_config_from_file(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit("配置文件必须是 JSON 对象。")
+    required = ["entry_port", "exit_port", "middle_ports", "server_port"]
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise SystemExit(f"配置文件缺少字段: {', '.join(missing)}")
+    allowed_keys = {
+        "entry_host",
+        "entry_port",
+        "middle_host",
+        "middle_ports",
+        "exit_host",
+        "exit_port",
+        "server_host",
+        "server_port",
+        "server_mode",
+        "proxy_mode",
+        "capture_pcap",
+        "capture_dir",
+    }
+    overrides = {key: data[key] for key in allowed_keys if key in data}
+    middle_ports = overrides.get("middle_ports")
+    if not isinstance(middle_ports, list) or not middle_ports:
+        raise SystemExit("middle_ports 必须是非空列表。")
+    overrides["middle_ports"] = [int(port) for port in middle_ports]
+    overrides["entry_port"] = int(overrides["entry_port"])
+    overrides["exit_port"] = int(overrides["exit_port"])
+    overrides["server_port"] = int(overrides["server_port"])
+    return overrides
+
+
 def load_config_from_env() -> Config:
-    # 使用默认配置构建，然后覆盖环境变量
+    # 使用默认配置构建，然后覆盖配置文件
     config = Config()
-    # 路径数量通过裁剪端口列表实现
-    path_count = _env_int("PATH_COUNT", len(config.middle_ports))
-    config.middle_ports = config.middle_ports[:path_count]
+    config_path = os.environ.get("CONFIG_PATH")
+    if not config_path:
+        raise SystemExit("需要设置 CONFIG_PATH 指向配置文件。")
+    overrides = load_config_from_file(Path(config_path))
+    config = replace(config, **overrides)
     # 按需覆盖实验参数
     config.padding_alpha = _env_float("ALPHA_PADDING", config.padding_alpha)
     config.obfuscation_level = _env_int("OBFUSCATION_LEVEL", config.obfuscation_level)
     config.mode = _env_str("MODE", config.mode)
-    config.server_host = _env_str("SERVER_HOST", config.server_host)
-    config.server_port = _env_int("SERVER_PORT", config.server_port)
     config.server_mode = _env_str("SERVER_MODE", config.server_mode)
     config.proxy_mode = _env_bool("PROXY_MODE", config.proxy_mode)
     config.proto_switch_period = _env_int("PROTO_SWITCH_PERIOD", config.proto_switch_period)
