@@ -24,6 +24,12 @@ async def run() -> None:
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
+    base_env["ENABLE_TRACE"] = "0"
+    if os.environ.get("START_ALL_ENABLE_TRACE") == "1":
+        base_env["ENABLE_TRACE"] = "1"
+    base_env["CAPTURE_PCAP"] = "0"
+    if os.environ.get("START_ALL_CAPTURE_PCAP") == "1":
+        base_env["CAPTURE_PCAP"] = "1"
     json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
     Path(json_log_path).parent.mkdir(parents=True, exist_ok=True)
     json_log_file = open(json_log_path, "a", encoding="utf-8")
@@ -111,7 +117,7 @@ async def run() -> None:
     await asyncio.sleep(0.5)
     # 可选：启动抓包
     capture_proc = None
-    if DEFAULT_CONFIG.capture_pcap or os.environ.get("CAPTURE_PCAP") == "1":
+    if DEFAULT_CONFIG.capture_pcap or base_env.get("CAPTURE_PCAP") == "1":
         capture_dir = os.environ.get("CAPTURE_DIR") or DEFAULT_CONFIG.capture_dir or f"{out_dir}/pcap"
         capture_proc = await asyncio.create_subprocess_exec(
             python,
