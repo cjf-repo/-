@@ -10,7 +10,7 @@ from typing import Iterable
 
 import numpy as np
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
@@ -82,9 +82,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bursts", type=int, default=50)
     parser.add_argument("--test-size", type=float, default=0.3)
     parser.add_argument("--random-state", type=int, default=42)
-    parser.add_argument("--kernel", type=str, default="rbf")
+    parser.add_argument(
+        "--kernel",
+        type=str,
+        default="rbf",
+        help="SVM kernel（rbf/linear/auto；auto 在调参时搜索 rbf+linear）",
+    )
     parser.add_argument("--C", type=float, default=1.0)
     parser.add_argument("--gamma", type=str, default="scale")
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="启用网格搜索调参以提升分类效果（适合正常流量基线）。",
+    )
+    parser.add_argument(
+        "--cv",
+        type=int,
+        default=3,
+        help="调参时交叉验证折数（默认 3）。",
+    )
     return parser.parse_args()
 
 
@@ -544,7 +560,22 @@ def main() -> None:
     x_test = scaler.transform(x_test)
 
     model = SVC(kernel=args.kernel, C=args.C, gamma=args.gamma)
-    model.fit(x_train, y_train)
+    if args.tune:
+        kernel = args.kernel
+        kernels = ["rbf", "linear"] if kernel == "auto" else [kernel]
+        param_grid = {
+            "kernel": kernels,
+            "C": [0.1, 1.0, 10.0],
+        }
+        if "rbf" in kernels:
+            param_grid["gamma"] = ["scale", "auto", 0.1, 1.0]
+        search = GridSearchCV(model, param_grid, cv=args.cv, scoring="accuracy")
+        search.fit(x_train, y_train)
+        model = search.best_estimator_
+        print("Best params:", search.best_params_)
+        print("Best CV accuracy:", search.best_score_)
+    else:
+        model.fit(x_train, y_train)
     preds = model.predict(x_test)
 
     print("SVM accuracy:", accuracy_score(y_test, preds))
