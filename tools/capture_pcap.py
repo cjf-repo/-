@@ -29,6 +29,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--entry-port", type=int, default=9001)
     parser.add_argument("--exit-port", type=int, default=9201)
     parser.add_argument("--middle-ports", default="9101,9102")
+    parser.add_argument("--client-port", type=int, default=None)
+    parser.add_argument(
+        "--client-port-scope",
+        choices=["entry", "all", "none"],
+        default="entry",
+        help="基于 client 端口过滤抓包范围：entry 表示仅入口端口过滤，all 表示所有端口都过滤，none 表示不使用 client 端口过滤",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +79,10 @@ async def main() -> None:
         LOGGER.error("未找到 tcpdump/tshark，无法自动抓包")
         return
 
+    client_filter = ""
+    if args.client_port is not None and args.client_port_scope != "none":
+        client_filter = f" and tcp port {args.client_port}"
+
     middle_ports = [p.strip() for p in args.middle_ports.split(",") if p.strip()]
     base = Path(args.out_dir)
 
@@ -79,7 +90,7 @@ async def main() -> None:
     first_proc = await run_capture(
         capture_cmd,
         base / "entry.pcap",
-        f"tcp port {args.entry_port}",
+        f"tcp port {args.entry_port}{client_filter if args.client_port_scope in ('entry', 'all') else ''}",
         check_startup=True,
     )
     if first_proc is None:
@@ -89,7 +100,7 @@ async def main() -> None:
     exit_proc = await run_capture(
         capture_cmd,
         base / "exit.pcap",
-        f"tcp port {args.exit_port}",
+        f"tcp port {args.exit_port}{client_filter if args.client_port_scope == 'all' else ''}",
         check_startup=True,
     )
     if exit_proc is None:
@@ -102,7 +113,7 @@ async def main() -> None:
         proc = await run_capture(
             capture_cmd,
             base / f"middle_{idx}.pcap",
-            f"tcp port {port}",
+            f"tcp port {port}{client_filter if args.client_port_scope == 'all' else ''}",
             check_startup=True,
         )
         if proc is None:

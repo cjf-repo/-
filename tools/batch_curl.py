@@ -7,6 +7,7 @@ import time
 import uuid
 import signal
 import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
 from typing import Iterable
 from urllib.parse import urlparse
@@ -86,6 +87,18 @@ def parse_args() -> argparse.Namespace:
         help="启动抓包后等待秒数，避免丢首包",
     )
     parser.add_argument(
+        "--local-port-start",
+        type=int,
+        default=0,
+        help="为每次 curl 分配固定源端口起始值（0 表示不启用）",
+    )
+    parser.add_argument(
+        "--local-port-end",
+        type=int,
+        default=0,
+        help="为每次 curl 分配固定源端口结束值（0 表示不启用）",
+    )
+    parser.add_argument(
         "--failures-file",
         default=None,
         help="保存失败请求列表的文件路径（默认不保存）",
@@ -134,6 +147,7 @@ def build_curl_cmd(
     follow_redirects: bool,
     insecure: bool,
     output_path: Path | None,
+    local_port: int | None,
 ) -> list[str]:
     cmd = [
         "curl",
@@ -151,6 +165,8 @@ def build_curl_cmd(
         cmd.insert(1, "-L")
     if insecure:
         cmd.insert(1, "-k")
+    if local_port is not None:
+        cmd.extend(["--local-port", str(local_port)])
     if output_path is None:
         cmd.extend(["-o", "/dev/null"])
     else:
@@ -172,6 +188,35 @@ def start_capture(out_dir: Path) -> subprocess.Popen:
         str(out_dir),
     ]
     return subprocess.Popen(cmd)
+
+
+def start_capture_with_client_port(out_dir: Path, client_port: int) -> subprocess.Popen:
+    cmd = [
+        sys.executable,
+        "-m",
+        "tools.capture_pcap",
+        "--out-dir",
+        str(out_dir),
+        "--client-port",
+        str(client_port),
+    ]
+    return subprocess.Popen(cmd)
+
+
+def build_port_pool(start: int, end: int, concurrency: int) -> queue.Queue[int] | None:
+    if start <= 0 and end <= 0:
+        return None
+    if start <= 0 or end <= 0:
+        raise SystemExit("--local-port-start 和 --local-port-end 必须同时设置且 > 0")
+    if end < start:
+        raise SystemExit("--local-port-end 必须 >= --local-port-start")
+    ports = list(range(start, end + 1))
+    if len(ports) < concurrency:
+        raise SystemExit("本地端口范围小于并发数，请扩大端口范围或降低 --concurrency")
+    port_queue: queue.Queue[int] = queue.Queue()
+    for port in ports:
+        port_queue.put(port)
+    return port_queue
 
 
 def url_label(url: str) -> str:
@@ -205,6 +250,7 @@ def main() -> None:
         raise SystemExit("--retry 必须 >= 0")
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
+    port_pool = build_port_pool(args.local_port_start, args.local_port_end, args.concurrency)
     max_pending = args.max_pending or args.concurrency * 4
     if max_pending < args.concurrency:
         max_pending = args.concurrency
@@ -221,11 +267,17 @@ def main() -> None:
         capture_proc = None
         run_dir = None
         output_path = None
+        local_port = None
         try:
+            if port_pool is not None:
+                local_port = port_pool.get()
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
-                capture_proc = start_capture(run_dir)
+                if local_port is None:
+                    capture_proc = start_capture(run_dir)
+                else:
+                    capture_proc = start_capture_with_client_port(run_dir, local_port)
                 if args.pcap_wait > 0:
                     time.sleep(args.pcap_wait)
             if args.output_dir is not None:
@@ -238,6 +290,7 @@ def main() -> None:
                 follow_redirects=args.follow_redirects,
                 insecure=args.insecure,
                 output_path=output_path,
+                local_port=local_port,
             )
             if args.print_cmd or args.cmd_file is not None:
                 cmd_line = " ".join(cmd)
@@ -261,11 +314,15 @@ def main() -> None:
                 except subprocess.TimeoutExpired:
                     capture_proc.terminate()
                     capture_proc.wait(timeout=5)
-            if run_dir is not None and args.pcap_dir is not None:
-                label = url_label(url)
-                move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
-            if args.sleep > 0:
-                time.sleep(args.sleep)
+            try:
+                if run_dir is not None and args.pcap_dir is not None:
+                    label = url_label(url)
+                    move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
+                if args.sleep > 0:
+                    time.sleep(args.sleep)
+            finally:
+                if port_pool is not None and local_port is not None:
+                    port_pool.put(local_port)
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
         task_iter = iter_tasks()
