@@ -122,12 +122,34 @@ def _env_str(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+def _env_ports(name: str, default: List[int]) -> List[int]:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    ports = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        ports.append(int(item))
+    return ports or default
+
+
 def load_config_from_env() -> Config:
     # 使用默认配置构建，然后覆盖环境变量
     config = Config()
-    # 路径数量通过裁剪端口列表实现
-    path_count = _env_int("PATH_COUNT", len(config.middle_ports))
-    config.middle_ports = config.middle_ports[:path_count]
+    config.entry_host = _env_str("ENTRY_HOST", config.entry_host)
+    config.entry_port = _env_int("ENTRY_PORT", config.entry_port)
+    config.middle_host = _env_str("MIDDLE_HOST", config.middle_host)
+    config.exit_host = _env_str("EXIT_HOST", config.exit_host)
+    config.exit_port = _env_int("EXIT_PORT", config.exit_port)
+    middle_ports_env = os.environ.get("MIDDLE_PORTS")
+    if middle_ports_env:
+        config.middle_ports = _env_ports("MIDDLE_PORTS", config.middle_ports)
+    else:
+        # 路径数量通过裁剪端口列表实现
+        path_count = _env_int("PATH_COUNT", len(config.middle_ports))
+        config.middle_ports = config.middle_ports[:path_count]
     # 按需覆盖实验参数
     config.padding_alpha = _env_float("ALPHA_PADDING", config.padding_alpha)
     config.obfuscation_level = _env_int("OBFUSCATION_LEVEL", config.obfuscation_level)
