@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
         help="多个代理地址（逗号分隔），用于并发分流，例如 http://127.0.0.1:9001,http://127.0.0.1:9011",
     )
     parser.add_argument(
+        "--proxy-configs",
+        default=None,
+        help="与 --proxy-list 一一对应的配置文件路径（逗号分隔），用于抓包时读取端口配置。",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=20,
@@ -146,6 +151,15 @@ def parse_proxies(proxy: str, proxy_list: str | None) -> list[str]:
     return proxies
 
 
+def parse_proxy_configs(configs: str | None, proxies: list[str]) -> dict[str, str]:
+    if configs is None:
+        return {}
+    config_list = [item.strip() for item in configs.split(",") if item.strip()]
+    if len(config_list) != len(proxies):
+        raise SystemExit("--proxy-configs 的数量必须与 --proxy-list 一致。")
+    return dict(zip(proxies, config_list, strict=True))
+
+
 def build_curl_cmd(
     url: str,
     proxy: str,
@@ -184,7 +198,7 @@ def run_curl(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
-def start_capture(out_dir: Path) -> subprocess.Popen:
+def start_capture(out_dir: Path, *, config_path: str | None) -> subprocess.Popen:
     cmd = [
         sys.executable,
         "-m",
@@ -192,6 +206,8 @@ def start_capture(out_dir: Path) -> subprocess.Popen:
         "--out-dir",
         str(out_dir),
     ]
+    if config_path:
+        cmd.extend(["--config", config_path])
     return subprocess.Popen(cmd)
 
 
@@ -227,6 +243,7 @@ def main() -> None:
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
     proxies = parse_proxies(args.proxy, args.proxy_list)
+    proxy_config_map = parse_proxy_configs(args.proxy_configs, proxies)
 
     class ProxyPool:
         def __init__(self, items: list[str]) -> None:
@@ -296,7 +313,10 @@ def main() -> None:
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
-                capture_proc = start_capture(run_dir)
+                capture_proc = start_capture(
+                    run_dir,
+                    config_path=proxy_config_map.get(proxy),
+                )
                 if args.pcap_wait > 0:
                     time.sleep(args.pcap_wait)
             if args.output_dir is not None:
