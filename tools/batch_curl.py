@@ -231,7 +231,7 @@ def run_curl(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
-def start_capture(out_dir: Path, *, config_path: str | None) -> subprocess.Popen:
+def start_capture(out_dir: Path, *, config_path: str | None, ready_file: Path | None) -> subprocess.Popen:
     cmd = [
         sys.executable,
         "-m",
@@ -239,6 +239,8 @@ def start_capture(out_dir: Path, *, config_path: str | None) -> subprocess.Popen
         "--out-dir",
         str(out_dir),
     ]
+    if ready_file is not None:
+        cmd.extend(["--ready-file", str(ready_file)])
     if config_path:
         cmd.extend(["--config", config_path])
     return subprocess.Popen(cmd)
@@ -336,6 +338,7 @@ def main() -> None:
     def worker(url: str, count: int) -> int:
         capture_proc = None
         run_dir = None
+        ready_file = None
         output_path = None
         proxy = ""
         try:
@@ -346,12 +349,18 @@ def main() -> None:
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
+                ready_file = run_dir / ".capture_ready"
                 capture_proc = start_capture(
                     run_dir,
                     config_path=proxy_config_map.get(proxy),
+                    ready_file=ready_file,
                 )
                 if args.pcap_wait > 0:
-                    time.sleep(args.pcap_wait)
+                    deadline = time.monotonic() + args.pcap_wait
+                    while time.monotonic() < deadline:
+                        if ready_file.exists():
+                            break
+                        time.sleep(0.05)
             if args.output_dir is not None:
                 output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
             cmd = build_curl_cmd(

@@ -27,6 +27,7 @@ def resolve_capture_cmd() -> list[str] | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="out/pcap")
+    parser.add_argument("--ready-file", default=None, help="抓包启动完成后写入的标记文件路径。")
     parser.add_argument("--config", default=None, help="可选 JSON 配置文件，覆盖端口配置。")
     parser.add_argument("--entry-port", type=int, default=9001)
     parser.add_argument("--exit-port", type=int, default=9201)
@@ -126,6 +127,10 @@ async def main() -> None:
                     started.terminate()
             return
         tasks.append(proc)
+
+    if args.ready_file:
+        Path(args.ready_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.ready_file).write_text("ready", encoding="utf-8")
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
