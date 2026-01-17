@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import shutil
 import signal
 from pathlib import Path
@@ -26,6 +27,7 @@ def resolve_capture_cmd() -> list[str] | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="out/pcap")
+    parser.add_argument("--config", default=None, help="可选 JSON 配置文件，覆盖端口配置。")
     parser.add_argument("--entry-port", type=int, default=9001)
     parser.add_argument("--exit-port", type=int, default=9201)
     parser.add_argument("--middle-ports", default="9101,9102")
@@ -53,7 +55,13 @@ async def run_capture(
         stderr=asyncio.subprocess.PIPE,
     )
     if check_startup:
-        await asyncio.sleep(0.2)
+        try:
+            await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.send_signal(signal.SIGINT)
+            LOGGER.info("抓包启动被取消")
+            return None
         if proc.returncode is not None:
             _, stderr = await proc.communicate()
             stderr_text = (stderr or b"").decode(errors="ignore").strip()
@@ -71,6 +79,13 @@ async def main() -> None:
     if capture_cmd is None:
         LOGGER.error("未找到 tcpdump/tshark，无法自动抓包")
         return
+    if args.config:
+        os.environ["CONFIG_PATH"] = args.config
+        from config import DEFAULT_CONFIG
+
+        args.entry_port = DEFAULT_CONFIG.entry_port
+        args.exit_port = DEFAULT_CONFIG.exit_port
+        args.middle_ports = ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports])
 
     middle_ports = [p.strip() for p in args.middle_ports.split(",") if p.strip()]
     base = Path(args.out_dir)
@@ -140,4 +155,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
