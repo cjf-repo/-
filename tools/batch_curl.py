@@ -298,13 +298,18 @@ def main() -> None:
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
     proxies = build_proxy_list(args.proxy, args.proxy_ports)
-    if args.concurrency > len(proxies):
+    if args.pcap_dir is not None and args.pcap_serial and args.concurrency > 1 and len(proxies) < 2:
+        raise SystemExit(
+            "抓包串行模式下并行实验需要多个入口端口，请使用 --proxy-ports 指定不同端口。"
+        )
+    effective_concurrency = args.concurrency
+    if args.pcap_dir is not None and args.pcap_serial and len(proxies) < args.concurrency:
         print(
-            f"并发数 {args.concurrency} 大于入口端口数量 {len(proxies)}，"
-            "已按入口端口数量限制并发。",
+            f"抓包串行模式下入口端口数量为 {len(proxies)}，"
+            f"实际吞吐受限于端口数量（请求会在端口内串行执行），"
+            f"当前并发参数为 {args.concurrency}。",
             file=sys.stderr,
         )
-    effective_concurrency = min(args.concurrency, len(proxies))
     max_pending = args.max_pending or effective_concurrency * 4
     if max_pending < effective_concurrency:
         max_pending = effective_concurrency
