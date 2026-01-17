@@ -181,6 +181,26 @@ python run_experiments.py
 - `ADAPTIVE_*`：static / adaptive_paths_only / adaptive_behavior_only / adaptive_proto_only / full_adaptive
 - baseline：`baseline_delay` / `baseline_padding`（固定单路径）
 
+## 使用配置文件启动 start_all
+
+可以通过 `start_all.py --config <json>` 直接读取端口配置，避免手动设置多组环境变量。
+
+示例配置（`config_ports.json`）：
+
+```json
+{
+  "entry_port": 9001,
+  "exit_port": 9201,
+  "middle_ports": [9101, 9102]
+}
+```
+
+启动示例：
+
+```bash
+python start_all.py --config config_ports.json
+```
+
 可直接修改 `run_experiments.py` 中的参数列表来裁剪实验规模。
 
 ## 实验步骤建议（论文复现实验）
