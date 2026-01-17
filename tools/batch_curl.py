@@ -8,6 +8,7 @@ import uuid
 import signal
 import threading
 import queue
+import json
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
 from typing import Iterable
 from urllib.parse import urlparse
@@ -34,6 +35,11 @@ def parse_args() -> argparse.Namespace:
         "--proxy-configs",
         default=None,
         help="与 --proxy-list 一一对应的配置文件路径（逗号分隔），用于抓包时读取端口配置。",
+    )
+    parser.add_argument(
+        "--config-list",
+        default=None,
+        help="配置文件路径列表（逗号分隔），从中读取 entry_host/entry_port 生成代理地址。",
     )
     parser.add_argument(
         "--timeout",
@@ -141,7 +147,9 @@ def read_urls(path: Path) -> list[str]:
     return urls
 
 
-def parse_proxies(proxy: str, proxy_list: str | None) -> list[str]:
+def parse_proxies(proxy: str, proxy_list: str | None, config_list: str | None) -> list[str]:
+    if config_list:
+        return [proxy for proxy, _ in load_config_proxies(config_list)]
     if proxy_list:
         proxies = [item.strip() for item in proxy_list.split(",") if item.strip()]
     else:
@@ -151,13 +159,38 @@ def parse_proxies(proxy: str, proxy_list: str | None) -> list[str]:
     return proxies
 
 
-def parse_proxy_configs(configs: str | None, proxies: list[str]) -> dict[str, str]:
+def load_config_proxies(config_list: str) -> list[tuple[str, str]]:
+    config_paths = [item.strip() for item in config_list.split(",") if item.strip()]
+    proxies: list[tuple[str, str]] = []
+    for path_str in config_paths:
+        path = Path(path_str)
+        if not path.exists():
+            raise SystemExit(f"配置文件不存在: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise SystemExit(f"配置文件格式错误: {path}")
+        host = data.get("entry_host")
+        port = data.get("entry_port")
+        if not host or port is None:
+            raise SystemExit(f"配置文件缺少 entry_host/entry_port: {path}")
+        proxies.append((f"http://{host}:{int(port)}", path_str))
+    return proxies
+
+
+def parse_proxy_configs(
+    configs: str | None,
+    proxies: list[str],
+    config_list: str | None,
+) -> dict[str, str]:
+    if config_list:
+        proxy_pairs = load_config_proxies(config_list)
+        return dict(proxy_pairs)
     if configs is None:
         return {}
-    config_list = [item.strip() for item in configs.split(",") if item.strip()]
-    if len(config_list) != len(proxies):
+    config_list_items = [item.strip() for item in configs.split(",") if item.strip()]
+    if len(config_list_items) != len(proxies):
         raise SystemExit("--proxy-configs 的数量必须与 --proxy-list 一致。")
-    return dict(zip(proxies, config_list, strict=True))
+    return dict(zip(proxies, config_list_items, strict=True))
 
 
 def build_curl_cmd(
@@ -242,8 +275,8 @@ def main() -> None:
         raise SystemExit("--retry 必须 >= 0")
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
-    proxies = parse_proxies(args.proxy, args.proxy_list)
-    proxy_config_map = parse_proxy_configs(args.proxy_configs, proxies)
+    proxies = parse_proxies(args.proxy, args.proxy_list, args.config_list)
+    proxy_config_map = parse_proxy_configs(args.proxy_configs, proxies, args.config_list)
 
     class ProxyPool:
         def __init__(self, items: list[str]) -> None:

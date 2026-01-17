@@ -128,7 +128,7 @@ def load_config_from_file(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise SystemExit("配置文件必须是 JSON 对象。")
-    required = ["entry_port", "exit_port", "middle_ports", "server_port"]
+    required = ["entry_host", "entry_port", "exit_port", "middle_ports", "server_host", "server_port"]
     missing = [key for key in required if key not in data]
     if missing:
         raise SystemExit(f"配置文件缺少字段: {', '.join(missing)}")
