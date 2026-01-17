@@ -190,10 +190,13 @@ python run_experiments.py
 
 ```json
 {
+  "entry_host": "127.0.0.1",
   "entry_port": 9001,
   "exit_port": 9201,
   "middle_ports": [9101, 9102],
-  "server_port": 9301
+  "server_host": "127.0.0.1",
+  "server_port": 9301,
+  "console_log": false
 }
 ```
 

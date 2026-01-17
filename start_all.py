@@ -69,8 +69,9 @@ async def run() -> None:
             if not line:
                 break
             text = line.decode(errors="replace").rstrip("\n")
-            target.write(text + "\n")
-            target.flush()
+            if config.console_log:
+                target.write(text + "\n")
+                target.flush()
             payload = {
                 "ts": time.time(),
                 "source": source,

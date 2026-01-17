@@ -90,6 +90,8 @@ class Config:
     capture_pcap: bool = False
     # 抓包输出目录
     capture_dir: str | None = None
+    # 是否输出节点日志到控制台
+    console_log: bool = True
 
     def paths(self) -> List[PathConfig]:
         # 根据端口列表生成路径配置
@@ -145,6 +147,7 @@ def load_config_from_file(path: Path) -> dict:
         "proxy_mode",
         "capture_pcap",
         "capture_dir",
+        "console_log",
     }
     overrides = {key: data[key] for key in allowed_keys if key in data}
     middle_ports = overrides.get("middle_ports")
@@ -154,6 +157,8 @@ def load_config_from_file(path: Path) -> dict:
     overrides["entry_port"] = int(overrides["entry_port"])
     overrides["exit_port"] = int(overrides["exit_port"])
     overrides["server_port"] = int(overrides["server_port"])
+    if "console_log" in overrides and not isinstance(overrides["console_log"], bool):
+        raise SystemExit("console_log 必须是布尔值 true/false。")
     return overrides
 
 

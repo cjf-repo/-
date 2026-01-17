@@ -4,5 +4,6 @@
   "exit_port": 9206,
   "middle_ports": [9151, 9152],
   "server_host": "127.0.0.1",
-  "server_port": 9306
+  "server_port": 9306,
+  "console_log": false
 }
