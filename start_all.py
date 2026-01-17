@@ -11,6 +11,24 @@ from pathlib import Path
 
 from config import DEFAULT_CONFIG
 
+
+def parse_ports(value: str) -> list[int]:
+    ports: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_str, end_str = part.split("-", 1)
+            start = int(start_str)
+            end = int(end_str)
+            if start > end:
+                start, end = end, start
+            ports.extend(range(start, end + 1))
+        else:
+            ports.append(int(part))
+    return ports
+
 # 一键启动脚本：启动 server/exit/middle/entry/client。
 
 
@@ -24,6 +42,12 @@ async def run() -> None:
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
+    base_env["ENABLE_TRACE"] = "0"
+    if os.environ.get("START_ALL_ENABLE_TRACE") == "1":
+        base_env["ENABLE_TRACE"] = "1"
+    base_env["CAPTURE_PCAP"] = "0"
+    if os.environ.get("START_ALL_CAPTURE_PCAP") == "1":
+        base_env["CAPTURE_PCAP"] = "1"
     json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
     Path(json_log_path).parent.mkdir(parents=True, exist_ok=True)
     json_log_file = open(json_log_path, "a", encoding="utf-8")
@@ -61,77 +85,98 @@ async def run() -> None:
         stream_tasks.append(asyncio.create_task(read_stream(server_proc.stdout, source="server", is_err=False)))
         stream_tasks.append(asyncio.create_task(read_stream(server_proc.stderr, source="server", is_err=True)))
         await asyncio.sleep(0.2)
-    # 启动出口节点
-    exit_proc = await asyncio.create_subprocess_exec(
-        python,
-        "-m",
-        "nodes.exit",
-        env=base_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    processes.append(exit_proc)
-    stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stdout, source="exit", is_err=False)))
-    stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stderr, source="exit", is_err=True)))
-    await asyncio.sleep(0.2)
-    # 启动中继节点
-    for port in DEFAULT_CONFIG.middle_ports:
-        path_id = DEFAULT_CONFIG.middle_ports.index(port)
-        middle_proc = await asyncio.create_subprocess_exec(
+    entry_ports = [DEFAULT_CONFIG.entry_port]
+    if DEFAULT_CONFIG.batch_proxy_ports:
+        entry_ports = parse_ports(DEFAULT_CONFIG.batch_proxy_ports)
+    base_entry_port = DEFAULT_CONFIG.entry_port
+    base_exit_port = DEFAULT_CONFIG.exit_port
+    base_middle_ports = list(DEFAULT_CONFIG.middle_ports)
+
+    for entry_port in entry_ports:
+        offset = entry_port - base_entry_port
+        exit_port = base_exit_port + offset
+        middle_ports = [port + offset for port in base_middle_ports]
+        exit_proc = await asyncio.create_subprocess_exec(
             python,
             "-m",
-            "nodes.middle",
+            "nodes.exit",
             "--listen",
-            str(port),
-            "--exit-port",
-            str(DEFAULT_CONFIG.exit_port),
-            "--path-id",
-            str(path_id),
+            str(exit_port),
             env=base_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        processes.append(middle_proc)
-        source = f"middle_{path_id}"
-        stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stdout, source=source, is_err=False)))
-        stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stderr, source=source, is_err=True)))
-    await asyncio.sleep(0.2)
-    # 启动入口节点
-    entry_proc = await asyncio.create_subprocess_exec(
-        python,
-        "-m",
-        "nodes.entry",
-        env=base_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    processes.append(entry_proc)
-    stream_tasks.append(asyncio.create_task(read_stream(entry_proc.stdout, source="entry", is_err=False)))
-    stream_tasks.append(asyncio.create_task(read_stream(entry_proc.stderr, source="entry", is_err=True)))
-    await asyncio.sleep(0.5)
+        processes.append(exit_proc)
+        exit_source = f"exit_{entry_port}"
+        stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stdout, source=exit_source, is_err=False)))
+        stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stderr, source=exit_source, is_err=True)))
+        await asyncio.sleep(0.2)
+        for idx, port in enumerate(middle_ports):
+            middle_proc = await asyncio.create_subprocess_exec(
+                python,
+                "-m",
+                "nodes.middle",
+                "--listen",
+                str(port),
+                "--exit-port",
+                str(exit_port),
+                "--path-id",
+                str(idx),
+                env=base_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            processes.append(middle_proc)
+            source = f"middle_{entry_port}_{idx}"
+            stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stdout, source=source, is_err=False)))
+            stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stderr, source=source, is_err=True)))
+        await asyncio.sleep(0.2)
+        entry_proc = await asyncio.create_subprocess_exec(
+            python,
+            "-m",
+            "nodes.entry",
+            "--listen",
+            str(entry_port),
+            "--middle-ports",
+            ",".join(str(port) for port in middle_ports),
+            env=base_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        processes.append(entry_proc)
+        entry_source = f"entry_{entry_port}"
+        stream_tasks.append(asyncio.create_task(read_stream(entry_proc.stdout, source=entry_source, is_err=False)))
+        stream_tasks.append(asyncio.create_task(read_stream(entry_proc.stderr, source=entry_source, is_err=True)))
+        await asyncio.sleep(0.5)
     # 可选：启动抓包
     capture_proc = None
-    if DEFAULT_CONFIG.capture_pcap or os.environ.get("CAPTURE_PCAP") == "1":
-        capture_dir = os.environ.get("CAPTURE_DIR") or DEFAULT_CONFIG.capture_dir or f"{out_dir}/pcap"
-        capture_proc = await asyncio.create_subprocess_exec(
-            python,
-            "-m",
-            "tools.capture_pcap",
-            "--out-dir",
-            capture_dir,
-            "--entry-port",
-            str(DEFAULT_CONFIG.entry_port),
-            "--exit-port",
-            str(DEFAULT_CONFIG.exit_port),
-            "--middle-ports",
-            ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports]),
-            env=base_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        processes.append(capture_proc)
-        stream_tasks.append(asyncio.create_task(read_stream(capture_proc.stdout, source="capture_pcap", is_err=False)))
-        stream_tasks.append(asyncio.create_task(read_stream(capture_proc.stderr, source="capture_pcap", is_err=True)))
+    if DEFAULT_CONFIG.capture_pcap or base_env.get("CAPTURE_PCAP") == "1":
+        capture_base_dir = os.environ.get("CAPTURE_DIR") or DEFAULT_CONFIG.capture_dir or f"{out_dir}/pcap"
+        for entry_port in entry_ports:
+            offset = entry_port - base_entry_port
+            exit_port = base_exit_port + offset
+            middle_ports = [port + offset for port in base_middle_ports]
+            capture_dir = str(Path(capture_base_dir) / f"entry_{entry_port}")
+            capture_proc = await asyncio.create_subprocess_exec(
+                python,
+                "-m",
+                "tools.capture_pcap",
+                "--out-dir",
+                capture_dir,
+                "--entry-port",
+                str(entry_port),
+                "--exit-port",
+                str(exit_port),
+                "--middle-ports",
+                ",".join([str(port) for port in middle_ports]),
+                env=base_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            processes.append(capture_proc)
+            source = f"capture_pcap_{entry_port}"
+            stream_tasks.append(asyncio.create_task(read_stream(capture_proc.stdout, source=source, is_err=False)))
+            stream_tasks.append(asyncio.create_task(read_stream(capture_proc.stderr, source=source, is_err=True)))
     # 启动客户端应用（代理模式下由浏览器/curl 触发）
     client_proc = None
     if os.environ.get("PROXY_MODE") != "1":
