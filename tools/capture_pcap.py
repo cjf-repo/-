@@ -143,4 +143,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        LOGGER.info("抓包被中断，退出。")
+        pass
