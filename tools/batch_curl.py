@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import subprocess
 import sys
 import time
 import uuid
 import signal
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
+from typing import Iterable
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -35,6 +37,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="并发请求数量（默认 1，>1 会并发执行 URL 访问）",
+    )
+    parser.add_argument(
+        "--max-pending",
+        type=int,
+        default=0,
+        help="待执行任务上限（0 表示自动 = 并发数 * 4）",
     )
     parser.add_argument(
         "--user-agent",
@@ -77,6 +85,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.2,
         help="启动抓包后等待秒数，避免丢首包",
+    )
+    parser.add_argument(
+        "--pcap-serial",
+        action="store_true",
+        default=True,
+        help="抓包时串行执行请求（默认启用，避免并发抓包导致重复流量统计）",
+    )
+    parser.add_argument(
+        "--pcap-parallel",
+        action="store_false",
+        dest="pcap_serial",
+        help="允许抓包并发执行（可能导致多份 pcap 记录同一流量）",
     )
     parser.add_argument(
         "--failures-file",
@@ -196,72 +216,101 @@ def main() -> None:
         raise SystemExit("--concurrency 必须 >= 1")
     if args.retry < 0:
         raise SystemExit("--retry 必须 >= 0")
+    if args.max_pending < 0:
+        raise SystemExit("--max-pending 必须 >= 0")
+    max_pending = args.max_pending or args.concurrency * 4
+    if max_pending < args.concurrency:
+        max_pending = args.concurrency
     failures = 0
     failure_entries: list[str] = []
     cmd_lines: list[str] = []
     cmd_lock = threading.Lock()
-    tasks: list[tuple[str, int]] = []
-    for url in urls:
-        for count in range(1, args.times + 1):
-            tasks.append((url, count))
+    pcap_lock = threading.Lock()
+    def iter_tasks() -> Iterable[tuple[str, int]]:
+        for url in urls:
+            for count in range(1, args.times + 1):
+                yield url, count
 
     def worker(url: str, count: int) -> int:
         capture_proc = None
         run_dir = None
         output_path = None
-        try:
-            if args.pcap_dir is not None:
-                run_id = uuid.uuid4().hex[:8]
-                run_dir = Path(args.pcap_dir) / run_id
-                capture_proc = start_capture(run_dir)
-                if args.pcap_wait > 0:
-                    time.sleep(args.pcap_wait)
-            if args.output_dir is not None:
-                output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
-            cmd = build_curl_cmd(
-                url,
-                args.proxy,
-                args.timeout,
-                user_agent=args.user_agent,
-                follow_redirects=args.follow_redirects,
-                insecure=args.insecure,
-                output_path=output_path,
-            )
-            if args.print_cmd or args.cmd_file is not None:
-                cmd_line = " ".join(cmd)
-                with cmd_lock:
-                    cmd_lines.append(cmd_line)
-                    if args.print_cmd:
-                        print(cmd_line, flush=True)
-            attempts = args.retry + 1
-            for attempt in range(attempts):
-                code = run_curl(cmd)
-                if code == 0:
-                    return code
-                if attempt < attempts - 1 and args.retry_delay > 0:
-                    time.sleep(args.retry_delay)
-            return code
-        finally:
-            if capture_proc is not None:
-                capture_proc.send_signal(signal.SIGINT)
-                try:
-                    capture_proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    capture_proc.terminate()
-                    capture_proc.wait(timeout=5)
-            if run_dir is not None and args.pcap_dir is not None:
-                label = url_label(url)
-                move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
-            if args.sleep > 0:
-                time.sleep(args.sleep)
+        pcap_guard: contextlib.AbstractContextManager = contextlib.nullcontext()
+        if args.pcap_dir is not None and args.pcap_serial:
+            pcap_guard = pcap_lock
+        with pcap_guard:
+            try:
+                if args.pcap_dir is not None:
+                    run_id = uuid.uuid4().hex[:8]
+                    run_dir = Path(args.pcap_dir) / run_id
+                    capture_proc = start_capture(run_dir)
+                    if args.pcap_wait > 0:
+                        time.sleep(args.pcap_wait)
+                if args.output_dir is not None:
+                    output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
+                cmd = build_curl_cmd(
+                    url,
+                    args.proxy,
+                    args.timeout,
+                    user_agent=args.user_agent,
+                    follow_redirects=args.follow_redirects,
+                    insecure=args.insecure,
+                    output_path=output_path,
+                )
+                if args.print_cmd or args.cmd_file is not None:
+                    cmd_line = " ".join(cmd)
+                    with cmd_lock:
+                        cmd_lines.append(cmd_line)
+                        if args.print_cmd:
+                            print(cmd_line, flush=True)
+                attempts = args.retry + 1
+                for attempt in range(attempts):
+                    code = run_curl(cmd)
+                    if code == 0:
+                        return code
+                    if attempt < attempts - 1 and args.retry_delay > 0:
+                        time.sleep(args.retry_delay)
+                return code
+            finally:
+                if capture_proc is not None:
+                    capture_proc.send_signal(signal.SIGINT)
+                    try:
+                        capture_proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        capture_proc.terminate()
+                        capture_proc.wait(timeout=5)
+                if run_dir is not None and args.pcap_dir is not None:
+                    label = url_label(url)
+                    move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
+                if args.sleep > 0:
+                    time.sleep(args.sleep)
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = [executor.submit(worker, url, count) for url, count in tasks]
-        for future in as_completed(futures):
-            code = future.result()
-            if code != 0:
-                failures += 1
-                failure_entries.append(f"{url}\t{count}")
+        task_iter = iter_tasks()
+        pending: dict[Future[int], tuple[str, int]] = {}
+
+        def submit_next() -> bool:
+            try:
+                next_task = next(task_iter)
+            except StopIteration:
+                return False
+            future = executor.submit(worker, *next_task)
+            pending[future] = next_task
+            return True
+
+        while len(pending) < max_pending and submit_next():
+            continue
+
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                url, count = pending.pop(future)
+                code = future.result()
+                if code != 0:
+                    failures += 1
+                    failure_entries.append(f"{url}\t{count}")
+                while len(pending) < max_pending and submit_next():
+                    continue
     if failures:
         if args.failures_file is not None:
             failure_path = Path(args.failures_file)
