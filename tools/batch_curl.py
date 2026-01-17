@@ -13,6 +13,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 from pathlib import Path
 
+from config import DEFAULT_CONFIG
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -29,7 +30,8 @@ def parse_args() -> argparse.Namespace:
         "--proxy-ports",
         default=None,
         help="多个入口端口（逗号/范围），如 9001,9002 或 9001-9006；"
-        "配合 --proxy 的主机与协议生成多个代理地址",
+        "配合 --proxy 的主机与协议生成多个代理地址；"
+        "未提供则使用 BATCH_PROXY_PORTS 配置",
     )
     parser.add_argument(
         "--timeout",
@@ -286,6 +288,8 @@ def move_pcap_files(run_dir: Path, base_dir: Path, label: str, count: int) -> No
 
 def main() -> None:
     args = parse_args()
+    if args.proxy_ports is None and DEFAULT_CONFIG.batch_proxy_ports:
+        args.proxy_ports = DEFAULT_CONFIG.batch_proxy_ports
     urls = read_urls(Path(args.input))
     if not urls:
         raise SystemExit("未读取到有效 URL，请检查输入文件。")
@@ -300,7 +304,8 @@ def main() -> None:
     proxies = build_proxy_list(args.proxy, args.proxy_ports)
     if args.pcap_dir is not None and args.pcap_serial and args.concurrency > 1 and len(proxies) < 2:
         raise SystemExit(
-            "抓包串行模式下并行实验需要多个入口端口，请使用 --proxy-ports 指定不同端口。"
+            "抓包串行模式下并行实验需要多个入口端口，请使用 --proxy-ports 或配置 "
+            "BATCH_PROXY_PORTS 指定不同端口。"
         )
     effective_concurrency = args.concurrency
     if args.pcap_dir is not None and args.pcap_serial and len(proxies) < args.concurrency:
