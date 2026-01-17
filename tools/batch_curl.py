@@ -7,6 +7,8 @@ import time
 import uuid
 import signal
 import threading
+import queue
+import json
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
 from typing import Iterable
 from urllib.parse import urlparse
@@ -23,6 +25,21 @@ def parse_args() -> argparse.Namespace:
         "--proxy",
         default="http://127.0.0.1:9001",
         help="代理地址（入口节点），例如 http://127.0.0.1:9001",
+    )
+    parser.add_argument(
+        "--proxy-list",
+        default=None,
+        help="多个代理地址（逗号分隔），用于并发分流，例如 http://127.0.0.1:9001,http://127.0.0.1:9011",
+    )
+    parser.add_argument(
+        "--proxy-configs",
+        default=None,
+        help="与 --proxy-list 一一对应的配置文件路径（逗号分隔），用于抓包时读取端口配置。",
+    )
+    parser.add_argument(
+        "--config-list",
+        default=None,
+        help="配置文件路径列表（逗号分隔），从中读取 entry_host/entry_port 生成代理地址。",
     )
     parser.add_argument(
         "--timeout",
@@ -86,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         help="启动抓包后等待秒数，避免丢首包",
     )
     parser.add_argument(
+        "--allow-pcap-overlap",
+        action="store_true",
+        help="允许并发抓包时多个请求混合在同一节点流量中（默认不允许）",
+    )
+    parser.add_argument(
         "--failures-file",
         default=None,
         help="保存失败请求列表的文件路径（默认不保存）",
@@ -123,6 +145,52 @@ def read_urls(path: Path) -> list[str]:
             continue
         urls.append(url)
     return urls
+
+
+def parse_proxies(proxy: str, proxy_list: str | None, config_list: str | None) -> list[str]:
+    if config_list:
+        return [proxy for proxy, _ in load_config_proxies(config_list)]
+    if proxy_list:
+        proxies = [item.strip() for item in proxy_list.split(",") if item.strip()]
+    else:
+        proxies = [proxy.strip()]
+    if not proxies:
+        raise SystemExit("未提供有效代理地址，请检查 --proxy 或 --proxy-list。")
+    return proxies
+
+
+def load_config_proxies(config_list: str) -> list[tuple[str, str]]:
+    config_paths = [item.strip() for item in config_list.split(",") if item.strip()]
+    proxies: list[tuple[str, str]] = []
+    for path_str in config_paths:
+        path = Path(path_str)
+        if not path.exists():
+            raise SystemExit(f"配置文件不存在: {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise SystemExit(f"配置文件格式错误: {path}")
+        host = data.get("entry_host")
+        port = data.get("entry_port")
+        if not host or port is None:
+            raise SystemExit(f"配置文件缺少 entry_host/entry_port: {path}")
+        proxies.append((f"http://{host}:{int(port)}", path_str))
+    return proxies
+
+
+def parse_proxy_configs(
+    configs: str | None,
+    proxies: list[str],
+    config_list: str | None,
+) -> dict[str, str]:
+    if config_list:
+        proxy_pairs = load_config_proxies(config_list)
+        return dict(proxy_pairs)
+    if configs is None:
+        return {}
+    config_list_items = [item.strip() for item in configs.split(",") if item.strip()]
+    if len(config_list_items) != len(proxies):
+        raise SystemExit("--proxy-configs 的数量必须与 --proxy-list 一致。")
+    return dict(zip(proxies, config_list_items, strict=True))
 
 
 def build_curl_cmd(
@@ -163,7 +231,7 @@ def run_curl(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
-def start_capture(out_dir: Path) -> subprocess.Popen:
+def start_capture(out_dir: Path, *, config_path: str | None, ready_file: Path | None) -> subprocess.Popen:
     cmd = [
         sys.executable,
         "-m",
@@ -171,6 +239,10 @@ def start_capture(out_dir: Path) -> subprocess.Popen:
         "--out-dir",
         str(out_dir),
     ]
+    if ready_file is not None:
+        cmd.extend(["--ready-file", str(ready_file)])
+    if config_path:
+        cmd.extend(["--config", config_path])
     return subprocess.Popen(cmd)
 
 
@@ -205,9 +277,55 @@ def main() -> None:
         raise SystemExit("--retry 必须 >= 0")
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
-    max_pending = args.max_pending or args.concurrency * 4
-    if max_pending < args.concurrency:
-        max_pending = args.concurrency
+    proxies = parse_proxies(args.proxy, args.proxy_list, args.config_list)
+    proxy_config_map = parse_proxy_configs(args.proxy_configs, proxies, args.config_list)
+
+    class ProxyPool:
+        def __init__(self, items: list[str]) -> None:
+            self.items = items
+            self._queue: queue.Queue[str] = queue.Queue()
+            for item in items:
+                self._queue.put(item)
+
+        def acquire(self) -> str:
+            return self._queue.get()
+
+        def release(self, proxy: str) -> None:
+            self._queue.put(proxy)
+
+    proxy_pool: ProxyPool | None = None
+    proxy_index = 0
+    proxy_select_lock = threading.Lock()
+
+    def next_proxy() -> str:
+        nonlocal proxy_index
+        with proxy_select_lock:
+            proxy = proxies[proxy_index % len(proxies)]
+            proxy_index += 1
+        return proxy
+
+    concurrency = args.concurrency
+    if args.pcap_dir is not None and not args.allow_pcap_overlap:
+        if len(proxies) == 1 and concurrency > 1:
+            print(
+                "检测到 --pcap-dir 与并发请求同时使用，为避免抓包混叠已将并发数降为 1。"
+                "如需并发，请启动多个入口并使用 --proxy-list 分流。",
+                file=sys.stderr,
+            )
+            concurrency = 1
+        else:
+            if concurrency > len(proxies):
+                print(
+                    "检测到 --pcap-dir 与并发请求同时使用，将并发数限制为代理数量以避免同一代理抓包混叠。",
+                    file=sys.stderr,
+                )
+                concurrency = len(proxies)
+            proxy_pool = ProxyPool(proxies)
+    if concurrency < 1:
+        concurrency = 1
+    max_pending = args.max_pending or concurrency * 4
+    if max_pending < concurrency:
+        max_pending = concurrency
     failures = 0
     failure_entries: list[str] = []
     cmd_lines: list[str] = []
@@ -220,19 +338,34 @@ def main() -> None:
     def worker(url: str, count: int) -> int:
         capture_proc = None
         run_dir = None
+        ready_file = None
         output_path = None
+        proxy = ""
         try:
+            if proxy_pool is not None:
+                proxy = proxy_pool.acquire()
+            else:
+                proxy = next_proxy()
             if args.pcap_dir is not None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
-                capture_proc = start_capture(run_dir)
+                ready_file = run_dir / ".capture_ready"
+                capture_proc = start_capture(
+                    run_dir,
+                    config_path=proxy_config_map.get(proxy),
+                    ready_file=ready_file,
+                )
                 if args.pcap_wait > 0:
-                    time.sleep(args.pcap_wait)
+                    deadline = time.monotonic() + args.pcap_wait
+                    while time.monotonic() < deadline:
+                        if ready_file.exists():
+                            break
+                        time.sleep(0.05)
             if args.output_dir is not None:
                 output_path = Path(args.output_dir) / f"{url_label(url)}_{count}.html"
             cmd = build_curl_cmd(
                 url,
-                args.proxy,
+                proxy,
                 args.timeout,
                 user_agent=args.user_agent,
                 follow_redirects=args.follow_redirects,
@@ -266,8 +399,10 @@ def main() -> None:
                 move_pcap_files(run_dir, Path(args.pcap_dir), label, count)
             if args.sleep > 0:
                 time.sleep(args.sleep)
+            if proxy_pool is not None and proxy:
+                proxy_pool.release(proxy)
 
-    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
         task_iter = iter_tasks()
         pending: dict[Future[int], tuple[str, int]] = {}
 
