@@ -10,7 +10,7 @@ from typing import Iterable
 
 import numpy as np
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
@@ -82,9 +82,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bursts", type=int, default=50)
     parser.add_argument("--test-size", type=float, default=0.3)
     parser.add_argument("--random-state", type=int, default=42)
-    parser.add_argument("--kernel", type=str, default="rbf")
+    parser.add_argument(
+        "--kernel",
+        type=str,
+        default="rbf",
+        help="SVM kernel（rbf/linear/auto；auto 在调参时搜索 rbf+linear）",
+    )
     parser.add_argument("--C", type=float, default=1.0)
     parser.add_argument("--gamma", type=str, default="scale")
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="启用网格搜索调参以提升分类效果（适合正常流量基线）。",
+    )
+    parser.add_argument(
+        "--cv",
+        type=int,
+        default=3,
+        help="调参时交叉验证折数（默认 3）。",
+    )
     return parser.parse_args()
 
 
@@ -276,6 +292,43 @@ def payload_entropy(payloads: list[bytes]) -> float:
     return float(-(probs * np.log2(probs + 1e-12)).sum())
 
 
+def length_histogram(payloads: list[int], bins: list[int]) -> list[float]:
+    if not payloads:
+        return [0.0] * (len(bins) + 1)
+    counts = size_distribution(payloads, bins)
+    total = max(counts.sum(), 1.0)
+    return list(counts / total)
+
+
+def direction_ngrams(packets: list[Packet], n: int = 3) -> list[float]:
+    if not packets:
+        return [0.0] * (2**n)
+    seq = [1 if pkt.direction >= 0 else 0 for pkt in packets]
+    counts = [0] * (2**n)
+    for i in range(len(seq) - n + 1):
+        idx = 0
+        for bit in seq[i : i + n]:
+            idx = (idx << 1) | bit
+        counts[idx] += 1
+    total = max(sum(counts), 1)
+    return [c / total for c in counts]
+
+
+def window_stats(packets: list[Packet], window_sec: float) -> list[float]:
+    if not packets:
+        return [0.0] * 6
+    start = packets[0].ts
+    buckets: dict[int, list[int]] = {}
+    for pkt in packets:
+        bucket = int((pkt.ts - start) / max(window_sec, 1e-3))
+        buckets.setdefault(bucket, []).append(pkt.payload_len)
+    means = [float(np.mean(values)) for values in buckets.values() if values]
+    totals = [float(np.sum(values)) for values in buckets.values() if values]
+    mean_stats = stats_short(means)
+    total_stats = stats_short(totals)
+    return list(mean_stats) + list(total_stats)
+
+
 def parse_frames(payloads: list[bytes]) -> tuple[int, int, int, int]:
     buffer = bytearray()
     padding_bytes = 0
@@ -422,6 +475,9 @@ def build_feature_vector(
     drift = window_drift(packets, DEFAULT_CONFIG.window_size_sec)
     entropy = payload_entropy(payloads)
     handshake = handshake_features(packets)
+    size_hist = length_histogram([pkt.payload_len for pkt in packets if pkt.payload_len > 0], size_bins)
+    dir_ngrams = direction_ngrams(packets, n=3)
+    window_feature_stats = window_stats(packets, DEFAULT_CONFIG.window_size_sec)
 
     features = []
     features.extend(sizes)
@@ -445,6 +501,9 @@ def build_feature_vector(
     features.extend([kl_div, drift, padding_ratio, proto_count, variant_count])
     features.extend([entropy])
     features.extend(handshake)
+    features.extend(size_hist)
+    features.extend(dir_ngrams)
+    features.extend(window_feature_stats)
     return features
 
 
@@ -544,7 +603,22 @@ def main() -> None:
     x_test = scaler.transform(x_test)
 
     model = SVC(kernel=args.kernel, C=args.C, gamma=args.gamma)
-    model.fit(x_train, y_train)
+    if args.tune:
+        kernel = args.kernel
+        kernels = ["rbf", "linear"] if kernel == "auto" else [kernel]
+        param_grid = {
+            "kernel": kernels,
+            "C": [0.1, 1.0, 10.0],
+        }
+        if "rbf" in kernels:
+            param_grid["gamma"] = ["scale", "auto", 0.1, 1.0]
+        search = GridSearchCV(model, param_grid, cv=args.cv, scoring="accuracy")
+        search.fit(x_train, y_train)
+        model = search.best_estimator_
+        print("Best params:", search.best_params_)
+        print("Best CV accuracy:", search.best_score_)
+    else:
+        model.fit(x_train, y_train)
     preds = model.predict(x_test)
 
     print("SVM accuracy:", accuracy_score(y_test, preds))
