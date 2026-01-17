@@ -292,6 +292,43 @@ def payload_entropy(payloads: list[bytes]) -> float:
     return float(-(probs * np.log2(probs + 1e-12)).sum())
 
 
+def length_histogram(payloads: list[int], bins: list[int]) -> list[float]:
+    if not payloads:
+        return [0.0] * (len(bins) + 1)
+    counts = size_distribution(payloads, bins)
+    total = max(counts.sum(), 1.0)
+    return list(counts / total)
+
+
+def direction_ngrams(packets: list[Packet], n: int = 3) -> list[float]:
+    if not packets:
+        return [0.0] * (2**n)
+    seq = [1 if pkt.direction >= 0 else 0 for pkt in packets]
+    counts = [0] * (2**n)
+    for i in range(len(seq) - n + 1):
+        idx = 0
+        for bit in seq[i : i + n]:
+            idx = (idx << 1) | bit
+        counts[idx] += 1
+    total = max(sum(counts), 1)
+    return [c / total for c in counts]
+
+
+def window_stats(packets: list[Packet], window_sec: float) -> list[float]:
+    if not packets:
+        return [0.0] * 6
+    start = packets[0].ts
+    buckets: dict[int, list[int]] = {}
+    for pkt in packets:
+        bucket = int((pkt.ts - start) / max(window_sec, 1e-3))
+        buckets.setdefault(bucket, []).append(pkt.payload_len)
+    means = [float(np.mean(values)) for values in buckets.values() if values]
+    totals = [float(np.sum(values)) for values in buckets.values() if values]
+    mean_stats = stats_short(means)
+    total_stats = stats_short(totals)
+    return list(mean_stats) + list(total_stats)
+
+
 def parse_frames(payloads: list[bytes]) -> tuple[int, int, int, int]:
     buffer = bytearray()
     padding_bytes = 0
@@ -438,6 +475,9 @@ def build_feature_vector(
     drift = window_drift(packets, DEFAULT_CONFIG.window_size_sec)
     entropy = payload_entropy(payloads)
     handshake = handshake_features(packets)
+    size_hist = length_histogram([pkt.payload_len for pkt in packets if pkt.payload_len > 0], size_bins)
+    dir_ngrams = direction_ngrams(packets, n=3)
+    window_feature_stats = window_stats(packets, DEFAULT_CONFIG.window_size_sec)
 
     features = []
     features.extend(sizes)
@@ -461,6 +501,9 @@ def build_feature_vector(
     features.extend([kl_div, drift, padding_ratio, proto_count, variant_count])
     features.extend([entropy])
     features.extend(handshake)
+    features.extend(size_hist)
+    features.extend(dir_ngrams)
+    features.extend(window_feature_stats)
     return features
 
 
