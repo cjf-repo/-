@@ -415,9 +415,11 @@ def main() -> None:
                 if args.sleep > 0:
                     time.sleep(args.sleep)
 
-    with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
+    executor = ThreadPoolExecutor(max_workers=effective_concurrency)
+    pending: dict[Future[int], tuple[str, int, str]] = {}
+    interrupted = False
+    try:
         task_iter = iter_tasks()
-        pending: dict[Future[int], tuple[str, int, str]] = {}
 
         def submit_next() -> bool:
             try:
@@ -441,6 +443,15 @@ def main() -> None:
                     failure_entries.append(f"{url}\t{count}")
                 while len(pending) < max_pending and submit_next():
                     continue
+    except KeyboardInterrupt:
+        interrupted = True
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise SystemExit("用户中断，提前退出。")
+    finally:
+        if not interrupted:
+            executor.shutdown(wait=True)
     if failures:
         if args.failures_file is not None:
             failure_path = Path(args.failures_file)
