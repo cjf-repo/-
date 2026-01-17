@@ -261,6 +261,9 @@ def move_pcap_files(run_dir: Path, base_dir: Path, label: str, count: int) -> No
     for path in run_dir.glob("*.pcap"):
         target = target_dir / f"{count}_{path.stem}.pcap"
         path.replace(target)
+    ready_marker = run_dir / ".capture_ready"
+    if ready_marker.exists():
+        ready_marker.unlink()
     run_dir.rmdir()
 
 
