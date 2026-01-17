@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import importlib
 import json
 import os
 import signal
@@ -9,9 +11,17 @@ import time
 import uuid
 from pathlib import Path
 
-from config import DEFAULT_CONFIG
-
 # 一键启动脚本：启动 server/exit/middle/entry/client。
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="可选 JSON 配置文件，用于覆盖端口等参数（例如 entry_port、exit_port、middle_ports）。",
+    )
+    return parser.parse_args()
 
 
 async def run() -> None:
@@ -20,6 +30,18 @@ async def run() -> None:
     stream_tasks: list[asyncio.Task] = []
     stop_event = asyncio.Event()
     python = sys.executable
+    args = parse_args()
+    if not args.config:
+        raise SystemExit("请通过 --config 指定配置文件。")
+    config_path = Path(args.config)
+    if not config_path.exists():
+        raise SystemExit(f"配置文件不存在: {config_path}")
+    os.environ["CONFIG_PATH"] = str(config_path)
+    if "config" in sys.modules:
+        config_module = importlib.reload(sys.modules["config"])
+    else:
+        config_module = importlib.import_module("config")
+    config = config_module.DEFAULT_CONFIG
     # 支持环境变量覆盖 run_id 与输出目录
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
@@ -30,6 +52,10 @@ async def run() -> None:
     base_env["CAPTURE_PCAP"] = "0"
     if os.environ.get("START_ALL_CAPTURE_PCAP") == "1":
         base_env["CAPTURE_PCAP"] = "1"
+    base_env["CONFIG_PATH"] = str(config_path)
+    base_env["CAPTURE_PCAP"] = "1" if config.capture_pcap else base_env["CAPTURE_PCAP"]
+    if config.capture_dir:
+        base_env["CAPTURE_DIR"] = config.capture_dir
     json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
     Path(json_log_path).parent.mkdir(parents=True, exist_ok=True)
     json_log_file = open(json_log_path, "a", encoding="utf-8")
@@ -81,8 +107,8 @@ async def run() -> None:
     stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stderr, source="exit", is_err=True)))
     await asyncio.sleep(0.2)
     # 启动中继节点
-    for port in DEFAULT_CONFIG.middle_ports:
-        path_id = DEFAULT_CONFIG.middle_ports.index(port)
+    for port in config.middle_ports:
+        path_id = config.middle_ports.index(port)
         middle_proc = await asyncio.create_subprocess_exec(
             python,
             "-m",
@@ -90,7 +116,7 @@ async def run() -> None:
             "--listen",
             str(port),
             "--exit-port",
-            str(DEFAULT_CONFIG.exit_port),
+            str(config.exit_port),
             "--path-id",
             str(path_id),
             env=base_env,
@@ -117,8 +143,8 @@ async def run() -> None:
     await asyncio.sleep(0.5)
     # 可选：启动抓包
     capture_proc = None
-    if DEFAULT_CONFIG.capture_pcap or base_env.get("CAPTURE_PCAP") == "1":
-        capture_dir = os.environ.get("CAPTURE_DIR") or DEFAULT_CONFIG.capture_dir or f"{out_dir}/pcap"
+    if config.capture_pcap or base_env.get("CAPTURE_PCAP") == "1":
+        capture_dir = os.environ.get("CAPTURE_DIR") or config.capture_dir or f"{out_dir}/pcap"
         capture_proc = await asyncio.create_subprocess_exec(
             python,
             "-m",
@@ -126,11 +152,11 @@ async def run() -> None:
             "--out-dir",
             capture_dir,
             "--entry-port",
-            str(DEFAULT_CONFIG.entry_port),
+            str(config.entry_port),
             "--exit-port",
-            str(DEFAULT_CONFIG.exit_port),
+            str(config.exit_port),
             "--middle-ports",
-            ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports]),
+            ",".join([str(port) for port in config.middle_ports]),
             env=base_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

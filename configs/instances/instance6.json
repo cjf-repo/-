@@ -1,0 +1,6 @@
+{
+  "entry_port": 9006,
+  "exit_port": 9206,
+  "middle_ports": [9151, 9152],
+  "server_port": 9306
+}
