@@ -129,6 +129,9 @@ curl -x http://127.0.0.1:9001 http://hcl.baidu.com/
 - 代理模式仅支持明文 HTTP，不支持 HTTPS CONNECT。
 - 入口会解析 Host 并自动将请求转发到目标站点，同时保持多路径与伪装策略。
 - 启用 `PROXY_MODE=1` 后，`start_all.py` 不再自动启动内置 client_app。
+- 如需并发抓包且避免同一节点流量混叠，可启动多个实例并指定不同端口：
+  - 环境变量：`ENTRY_PORT`、`EXIT_PORT`、`MIDDLE_PORTS`（逗号分隔）
+  - `tools/batch_curl.py` 支持通过 `--proxy-list` 分流到多个入口。
 
 ## 实验输出目录与复现信息
 
