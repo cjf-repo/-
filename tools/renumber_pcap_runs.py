@@ -43,13 +43,21 @@ def iter_label_dirs(root: Path) -> list[Path]:
     return [p for p in root.iterdir() if p.is_dir()]
 
 
-def collect_by_suffix(label_dir: Path, suffixes: list[str]) -> dict[str, list[Path]]:
+def collect_by_suffix(
+    label_dir: Path,
+    suffixes: list[str],
+    *,
+    min_index: int,
+) -> dict[str, list[Path]]:
     grouped: dict[str, list[Path]] = {suffix: [] for suffix in suffixes}
     for path in label_dir.glob("*.pcap"):
         match = PCAP_NAME_RE.match(path.name)
         if not match:
             continue
-        suffix = match.group("suffix")
+        count = int(match.group("count"))
+        if count < min_index:
+            continue
+        suffix = match.group("suffix").removesuffix(".pcap")
         if suffix not in grouped:
             continue
         grouped[suffix].append(path)
@@ -59,7 +67,7 @@ def collect_by_suffix(label_dir: Path, suffixes: list[str]) -> dict[str, list[Pa
 
 
 def plan_renames(label_dir: Path, start: int, suffixes: list[str]) -> list[tuple[Path, Path]]:
-    grouped = collect_by_suffix(label_dir, suffixes)
+    grouped = collect_by_suffix(label_dir, suffixes, min_index=start)
     max_len = max((len(files) for files in grouped.values()), default=0)
     renames: list[tuple[Path, Path]] = []
     for idx in range(max_len):
@@ -69,7 +77,7 @@ def plan_renames(label_dir: Path, start: int, suffixes: list[str]) -> list[tuple
             if idx >= len(files):
                 continue
             src = files[idx]
-            dst = label_dir / f"{new_index}_{suffix}"
+            dst = label_dir / f"{new_index}_{suffix}.pcap"
             renames.append((src, dst))
     return renames
 
