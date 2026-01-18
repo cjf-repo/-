@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 
-PCAP_NAME_RE = re.compile(r"^(?P<count>\\d+)_(?P<suffix>.+\\.pcap)$")
+PCAP_NAME_RE = re.compile(r"^(?P<count>\d+)_(?P<suffix>.+\.pcap)$")
 
 
 def parse_args() -> argparse.Namespace:
