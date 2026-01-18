@@ -18,11 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from config import DEFAULT_CONFIG
 from frames import HEADER_STRUCT, FLAG_PADDING
 
 PCAP_GLOBAL_HEADER_LEN = 24
 PCAP_RECORD_HEADER_LEN = 16
+DEFAULT_WINDOW_SIZE_SEC = 10
+DEFAULT_SIZE_BINS = [300, 600, 900, 1200]
 
 
 @dataclass
@@ -419,7 +420,7 @@ def build_feature_vector(
     if ref_distribution is not None:
         kl_div = kl_divergence(size_dist, ref_distribution)
 
-    drift = window_drift(packets, DEFAULT_CONFIG.window_size_sec)
+    drift = window_drift(packets, DEFAULT_WINDOW_SIZE_SEC)
     entropy = payload_entropy(payloads)
     handshake = handshake_features(packets)
 
@@ -481,7 +482,7 @@ def build_reference_distribution(
 
 def main() -> None:
     args = parse_args()
-    size_bins = DEFAULT_CONFIG.size_bins
+    size_bins = DEFAULT_SIZE_BINS
     reference = None
     if args.kl_reference_root is not None:
         reference = build_reference_distribution(
