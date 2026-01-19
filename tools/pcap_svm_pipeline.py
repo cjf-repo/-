@@ -512,14 +512,14 @@ def main() -> None:
             feature_len = len(features)
         rows.append({"label": label, "group": group, **{f"f{i}": v for i, v in enumerate(features)}})
 
+    if feature_len is None:
+        raise RuntimeError("未生成特征，请检查 PCAP 输入。")
+
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     with args.output_csv.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
-
-    if feature_len is None:
-        raise RuntimeError("未生成特征，请检查 PCAP 输入。")
     if skipped:
         print(f"Skipped {skipped} samples with < {args.min_pkts} packets.")
     labels = [row["label"] for row in rows]
