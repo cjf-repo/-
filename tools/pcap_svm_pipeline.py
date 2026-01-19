@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-pkts", type=int, default=500)
     parser.add_argument("--max-bursts", type=int, default=50)
-    parser.add_argument("--min-pkts", type=int, default=5, help="丢弃包数量过少的样本。")
+    parser.add_argument("--min-pkts", type=int, default=1, help="丢弃包数量过少的样本。")
     parser.add_argument("--test-size", type=float, default=0.3)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--kernel", type=str, default="rbf")
@@ -145,6 +145,13 @@ def parse_packet(packet: bytes, linktype: int):
         if eth_type != 0x0800:
             return None
         payload = packet[14:]
+    elif linktype == 113:
+        if len(packet) < 16:
+            return None
+        eth_type = struct.unpack("!H", packet[14:16])[0]
+        if eth_type != 0x0800:
+            return None
+        payload = packet[16:]
     elif linktype == 101:
         payload = packet
     else:
