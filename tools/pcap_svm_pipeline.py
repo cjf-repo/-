@@ -540,6 +540,17 @@ def main() -> None:
     labels = [row["label"] for row in rows]
     feature_matrix = np.array([[row[f"f{i}"] for i in range(feature_len)] for row in rows])
 
+    label_counts: dict[str, int] = {}
+    for label in labels:
+        label_counts[label] = label_counts.get(label, 0) + 1
+    keep_mask = [label_counts[label] >= 2 for label in labels]
+    dropped_labels = sorted({label for label, count in label_counts.items() if count < 2})
+    if dropped_labels:
+        print(f"Skipped labels with < 2 samples: {', '.join(dropped_labels)}")
+    if not all(keep_mask):
+        labels = [label for label, keep in zip(labels, keep_mask) if keep]
+        feature_matrix = feature_matrix[[idx for idx, keep in enumerate(keep_mask) if keep]]
+
     unique_labels = sorted(set(labels))
     if len(unique_labels) < 2:
         raise RuntimeError("分类类别少于 2 个，无法进行 SVM 训练。")
