@@ -81,11 +81,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-pkts", type=int, default=500)
     parser.add_argument("--max-bursts", type=int, default=50)
+    parser.add_argument("--min-pkts", type=int, default=5, help="丢弃包数量过少的样本。")
     parser.add_argument("--test-size", type=float, default=0.3)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--kernel", type=str, default="rbf")
     parser.add_argument("--C", type=float, default=1.0)
     parser.add_argument("--gamma", type=str, default="scale")
+    parser.add_argument("--class-weight", type=str, default="balanced")
     return parser.parse_args()
 
 
@@ -491,10 +493,14 @@ def main() -> None:
 
     rows = []
     feature_len = None
+    skipped = 0
     for pcap, label, group in collect_pcaps(
         args.pcap_root, args.group_level, args.pcap_suffix
     ):
         packets = load_pcap_packets(pcap)
+        if len(packets) < args.min_pkts:
+            skipped += 1
+            continue
         features = build_feature_vector(
             packets,
             args.max_pkts,
@@ -514,6 +520,8 @@ def main() -> None:
 
     if feature_len is None:
         raise RuntimeError("未生成特征，请检查 PCAP 输入。")
+    if skipped:
+        print(f"Skipped {skipped} samples with < {args.min_pkts} packets.")
     labels = [row["label"] for row in rows]
     feature_matrix = np.array([[row[f"f{i}"] for i in range(feature_len)] for row in rows])
 
@@ -544,7 +552,8 @@ def main() -> None:
     x_train = scaler.fit_transform(x_train)
     x_test = scaler.transform(x_test)
 
-    model = SVC(kernel=args.kernel, C=args.C, gamma=args.gamma)
+    class_weight = None if args.class_weight == "none" else args.class_weight
+    model = SVC(kernel=args.kernel, C=args.C, gamma=args.gamma, class_weight=class_weight)
     model.fit(x_train, y_train)
     preds = model.predict(x_test)
 
