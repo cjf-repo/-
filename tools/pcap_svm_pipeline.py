@@ -463,11 +463,14 @@ def collect_pcaps(root: Path, group_level: bool, suffix: str) -> list[tuple[Path
                 for pcap in label_dir.glob(f"*_{suffix}.pcap"):
                     entries.append((pcap, label_dir.name, group_dir.name))
     else:
-        for label_dir in root.iterdir():
-            if not label_dir.is_dir():
-                continue
-            for pcap in label_dir.glob(f"*_{suffix}.pcap"):
-                entries.append((pcap, label_dir.name, "default"))
+        label_dirs = [p for p in root.iterdir() if p.is_dir()]
+        if label_dirs:
+            for label_dir in label_dirs:
+                for pcap in label_dir.glob(f"*_{suffix}.pcap"):
+                    entries.append((pcap, label_dir.name, "default"))
+        else:
+            for pcap in root.glob(f"*_{suffix}.pcap"):
+                entries.append((pcap, root.name, "default"))
     return entries
 
 
@@ -494,9 +497,11 @@ def main() -> None:
     rows = []
     feature_len = None
     skipped = 0
+    total_pcaps = 0
     for pcap, label, group in collect_pcaps(
         args.pcap_root, args.group_level, args.pcap_suffix
     ):
+        total_pcaps += 1
         packets = load_pcap_packets(pcap)
         if len(packets) < args.min_pkts:
             skipped += 1
@@ -513,7 +518,10 @@ def main() -> None:
         rows.append({"label": label, "group": group, **{f"f{i}": v for i, v in enumerate(features)}})
 
     if feature_len is None:
-        raise RuntimeError("未生成特征，请检查 PCAP 输入。")
+        raise RuntimeError(
+            f"未生成特征（找到 {total_pcaps} 个 pcap，"
+            f"跳过 {skipped} 个）。请检查 PCAP 输入与 --pcap-suffix。"
+        )
 
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     with args.output_csv.open("w", newline="", encoding="utf-8") as handle:
