@@ -95,7 +95,7 @@ def load_pcap_packets(path: Path) -> list[Packet]:
     with path.open("rb") as handle:
         header = handle.read(PCAP_GLOBAL_HEADER_LEN)
         if len(header) < PCAP_GLOBAL_HEADER_LEN:
-            raise RuntimeError(f"{path} 头部不完整")
+            raise ValueError(f"{path} 头部不完整")
         magic = struct.unpack("<I", header[:4])[0]
         if magic == 0xA1B2C3D4:
             endian = "<"
@@ -505,11 +505,16 @@ def main() -> None:
     feature_len = None
     skipped = 0
     total_pcaps = 0
+    bad_pcaps: list[str] = []
     for pcap, label, group in collect_pcaps(
         args.pcap_root, args.group_level, args.pcap_suffix
     ):
         total_pcaps += 1
-        packets = load_pcap_packets(pcap)
+        try:
+            packets = load_pcap_packets(pcap)
+        except ValueError as exc:
+            bad_pcaps.append(str(exc))
+            continue
         if len(packets) < args.min_pkts:
             skipped += 1
             continue
@@ -537,6 +542,12 @@ def main() -> None:
         writer.writerows(rows)
     if skipped:
         print(f"Skipped {skipped} samples with < {args.min_pkts} packets.")
+    if bad_pcaps:
+        print("Skipped corrupt pcaps:")
+        for msg in bad_pcaps[:10]:
+            print(f"  - {msg}")
+        if len(bad_pcaps) > 10:
+            print(f"  ... and {len(bad_pcaps) - 10} more")
     labels = [row["label"] for row in rows]
     feature_matrix = np.array([[row[f"f{i}"] for i in range(feature_len)] for row in rows])
 
