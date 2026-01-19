@@ -129,6 +129,9 @@ curl -x http://127.0.0.1:9001 http://hcl.baidu.com/
 - 代理模式仅支持明文 HTTP，不支持 HTTPS CONNECT。
 - 入口会解析 Host 并自动将请求转发到目标站点，同时保持多路径与伪装策略。
 - 启用 `PROXY_MODE=1` 后，`start_all.py` 不再自动启动内置 client_app。
+- 如需并发抓包且避免同一节点流量混叠，可启动多个实例并指定不同端口：
+  - 环境变量：`ENTRY_PORT`、`EXIT_PORT`、`MIDDLE_PORTS`（逗号分隔）
+  - `tools/batch_curl.py` 支持通过 `--proxy-list` 分流到多个入口。
 
 ## 实验输出目录与复现信息
 
@@ -177,6 +180,31 @@ python run_experiments.py
 - `PROTO_SWITCH_PERIOD`：1/3/5
 - `ADAPTIVE_*`：static / adaptive_paths_only / adaptive_behavior_only / adaptive_proto_only / full_adaptive
 - baseline：`baseline_delay` / `baseline_padding`（固定单路径）
+
+## 使用配置文件启动 start_all
+
+可以通过 `start_all.py --config <json>` 直接读取端口配置，避免手动设置多组环境变量。
+现在端口配置必须来自配置文件（环境变量 `CONFIG_PATH`），单独运行各节点时也需要先设置该变量。
+
+示例配置（`config_ports.json`）：
+
+```json
+{
+  "entry_host": "127.0.0.1",
+  "entry_port": 9001,
+  "exit_port": 9201,
+  "middle_ports": [9101, 9102],
+  "server_host": "127.0.0.1",
+  "server_port": 9301,
+  "console_log": false
+}
+```
+
+启动示例：
+
+```bash
+python start_all.py --config config_ports.json
+```
 
 可直接修改 `run_experiments.py` 中的参数列表来裁剪实验规模。
 
