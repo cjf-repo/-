@@ -98,6 +98,41 @@ export EXTERNAL_SERVER=1
 python start_all.py
 ```
 
+## PCAP 特征提取
+
+如需单独导出特征用于随机森林/DF/Var-CNN 等模型，可使用特征提取脚本：
+
+```bash
+python tools/pcap_feature_extractor.py --pcap-root out/pcap_run_nor100_2 --output-csv out/features.npz
+```
+
+可选输出格式：
+
+```bash
+python tools/pcap_feature_extractor.py --pcap-root out/pcap_run_nor100_2 \
+  --output-csv out/features.npz --output-format npz
+```
+
+使用导出的 NPZ 训练 SVM：
+
+```bash
+python tools/pcap_svm_pipeline.py --features-npz out/features.npz
+```
+
+## 基于 PCAP 的 JS 散度与雷达图
+
+使用 PCAP 统计特征分布的 JS 散度，并生成“特征拟合雷达图”：
+
+```bash
+python tools/jsd_pcap_analysis.py \
+  --baseline-root out/pcap_baseline \
+  --candidate-root out/pcap_scheme_a \
+  --candidate-root out/pcap_scheme_b \
+  --labels 本文方案,对比方案A \
+  --output-json out/jsd_metrics.json \
+  --output-plot out/jsd_radar.png
+```
+
 3) 发起真实 HTTP 请求
 
 ```bash
