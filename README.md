@@ -119,6 +119,25 @@ python tools/pcap_feature_extractor.py --pcap-root out/pcap_run_nor100_2 \
 python tools/pcap_svm_pipeline.py --features-npz out/features.npz
 ```
 
+## 多模型网站指纹攻击（SVM / RF / CNN / DF / Var-CNN）
+
+统一训练与评估入口：
+
+```bash
+python tools/wf_attack_runner.py --features-npz out/features.npz --model svm
+python tools/wf_attack_runner.py --features-npz out/features.npz --model rf
+python tools/wf_attack_runner.py --features-npz out/features.npz --model cnn
+python tools/wf_attack_runner.py --features-npz out/features.npz --model df
+python tools/wf_attack_runner.py --features-npz out/features.npz --model varcnn
+```
+
+输出 JSON（包含 accuracy、precision/recall/F1、混淆矩阵、分类报告）：
+
+```bash
+python tools/wf_attack_runner.py --features-npz out/features.npz --model rf \
+  --output-json out/wf_metrics_rf.json
+```
+
 ## 基于 PCAP 的 JS 散度与雷达图
 
 使用 PCAP 统计特征分布的 JS 散度，并生成“特征拟合雷达图”：
