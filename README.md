@@ -98,6 +98,21 @@ export EXTERNAL_SERVER=1
 python start_all.py
 ```
 
+## PCAP 特征提取
+
+如需单独导出特征用于随机森林/DF/Var-CNN 等模型，可使用特征提取脚本：
+
+```bash
+python tools/pcap_feature_extractor.py --pcap-root out/pcap_run_nor100_2 --output-csv out/features.csv
+```
+
+可选输出格式：
+
+```bash
+python tools/pcap_feature_extractor.py --pcap-root out/pcap_run_nor100_2 \
+  --output-csv out/features.npz --output-format npz
+```
+
 3) 发起真实 HTTP 请求
 
 ```bash
