@@ -39,7 +39,7 @@ class Packet:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="从 PCAP 提取特征并导出 CSV")
+    parser = argparse.ArgumentParser(description="从 PCAP 提取特征并导出文件")
     parser.add_argument(
         "--pcap-root",
         type=Path,
@@ -49,13 +49,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=Path("out/features.csv"),
-        help="输出特征 CSV 路径",
+        default=Path("out/features.npz"),
+        help="输出特征文件路径",
     )
     parser.add_argument(
         "--output-format",
         choices=("csv", "jsonl", "npz"),
-        default="csv",
+        default="npz",
         help="输出特征格式（csv/jsonl/npz）",
     )
     parser.add_argument(
@@ -559,6 +559,15 @@ def write_features_npz(output_path: Path, rows: list[dict[str, object]]) -> None
         groups=groups,
         feature_names=np.array(feature_names, dtype=str),
     )
+
+
+def load_features_npz(npz_path: Path) -> tuple[np.ndarray, list[str], list[str], list[str]]:
+    data = np.load(npz_path, allow_pickle=False)
+    features = data["features"]
+    labels = data["labels"].astype(str).tolist()
+    groups = data["groups"].astype(str).tolist()
+    feature_names = data["feature_names"].astype(str).tolist()
+    return features, labels, groups, feature_names
 
 
 def write_features(

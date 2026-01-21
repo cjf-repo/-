@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-from pcap_feature_extractor import extract_features, write_features
+from pcap_feature_extractor import extract_features, load_features_npz, write_features
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,14 +19,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pcap-root",
         type=Path,
-        required=True,
+        default=None,
         help="PCAP 根目录，默认结构: root/<group>/<label>/*.pcap 或 root/<label>/*.pcap",
+    )
+    parser.add_argument(
+        "--features-npz",
+        type=Path,
+        default=None,
+        help="已导出的 NPZ 特征文件路径（优先使用该文件训练）",
     )
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=Path("out/features.csv"),
-        help="输出特征 CSV 路径",
+        default=Path("out/features.npz"),
+        help="输出特征文件路径",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=("csv", "jsonl", "npz"),
+        default="npz",
+        help="输出特征格式（csv/jsonl/npz）",
     )
     parser.add_argument(
         "--output-format",
@@ -68,26 +80,31 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    rows, feature_len, skipped, _total_pcaps, bad_pcaps = extract_features(
-        args.pcap_root,
-        group_level=args.group_level,
-        suffix=args.pcap_suffix,
-        max_pkts=args.max_pkts,
-        max_bursts=args.max_bursts,
-        min_pkts=args.min_pkts,
-        reference_root=args.kl_reference_root,
-    )
-    write_features(args.output_csv, rows, output_format=args.output_format)
-    if skipped:
-        print(f"Skipped {skipped} samples with < {args.min_pkts} packets.")
-    if bad_pcaps:
-        print("Skipped corrupt pcaps:")
-        for msg in bad_pcaps[:10]:
-            print(f"  - {msg}")
-        if len(bad_pcaps) > 10:
-            print(f"  ... and {len(bad_pcaps) - 10} more")
-    labels = [row["label"] for row in rows]
-    feature_matrix = np.array([[row[f"f{i}"] for i in range(feature_len)] for row in rows])
+    if args.features_npz is not None:
+        feature_matrix, labels, _groups, _feature_names = load_features_npz(args.features_npz)
+    else:
+        if args.pcap_root is None:
+            raise RuntimeError("请提供 --features-npz 或 --pcap-root。")
+        rows, feature_len, skipped, _total_pcaps, bad_pcaps = extract_features(
+            args.pcap_root,
+            group_level=args.group_level,
+            suffix=args.pcap_suffix,
+            max_pkts=args.max_pkts,
+            max_bursts=args.max_bursts,
+            min_pkts=args.min_pkts,
+            reference_root=args.kl_reference_root,
+        )
+        write_features(args.output_csv, rows, output_format=args.output_format)
+        if skipped:
+            print(f"Skipped {skipped} samples with < {args.min_pkts} packets.")
+        if bad_pcaps:
+            print("Skipped corrupt pcaps:")
+            for msg in bad_pcaps[:10]:
+                print(f"  - {msg}")
+            if len(bad_pcaps) > 10:
+                print(f"  ... and {len(bad_pcaps) - 10} more")
+        labels = [row["label"] for row in rows]
+        feature_matrix = np.array([[row[f"f{i}"] for i in range(feature_len)] for row in rows])
 
     label_counts: dict[str, int] = {}
     for label in labels:
