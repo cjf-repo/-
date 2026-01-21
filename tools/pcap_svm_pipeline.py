@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
         help="输出特征格式（csv/jsonl/npz）",
     )
     parser.add_argument(
+        "--output-format",
+        choices=("csv", "jsonl", "npz"),
+        default="csv",
+        help="输出特征格式（csv/jsonl/npz）",
+    )
+    parser.add_argument(
         "--group-level",
         action="store_true",
         help="启用 group 目录结构 root/<group>/<label>/*.pcap",
