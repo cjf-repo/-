@@ -15,6 +15,7 @@ from pcap_feature_extractor import extract_features, load_features_npz, write_fe
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="从 PCAP 提取特征并训练/评估 SVM 指纹模型",
+        conflict_handler="resolve",
     )
     parser.add_argument(
         "--pcap-root",
@@ -38,12 +39,6 @@ def parse_args() -> argparse.Namespace:
         "--output-format",
         choices=("csv", "jsonl", "npz"),
         default="npz",
-        help="输出特征格式（csv/jsonl/npz）",
-    )
-    parser.add_argument(
-        "--output-format",
-        choices=("csv", "jsonl", "npz"),
-        default="csv",
         help="输出特征格式（csv/jsonl/npz）",
     )
     parser.add_argument(
