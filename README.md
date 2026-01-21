@@ -133,6 +133,17 @@ python tools/jsd_pcap_analysis.py \
   --output-plot out/jsd_radar.png
 ```
 
+使用 NPZ 特征直接对比并出图：
+
+```bash
+python tools/jsd_pcap_analysis.py \
+  --baseline-npz out/plain_features.npz \
+  --candidate-npz out/obfuscated_features.npz \
+  --labels 未伪装,本文方案 \
+  --output-json out/jsd_metrics.json \
+  --output-plot out/jsd_radar.png
+```
+
 3) 发起真实 HTTP 请求
 
 ```bash
