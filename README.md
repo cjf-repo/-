@@ -119,6 +119,48 @@ python tools/pcap_feature_extractor.py --pcap-root out/pcap_run_nor100_2 \
 python tools/pcap_svm_pipeline.py --features-npz out/features.npz
 ```
 
+## 多模型网站指纹攻击（SVM / RF / CNN / DF / Var-CNN）
+
+统一训练与评估入口：
+
+```bash
+python tools/wf_attack_runner.py --features-npz out/features.npz --model svm
+python tools/wf_attack_runner.py --features-npz out/features.npz --model rf
+python tools/wf_attack_runner.py --features-npz out/features.npz --model cnn
+python tools/wf_attack_runner.py --features-npz out/features.npz --model df
+python tools/wf_attack_runner.py --features-npz out/features.npz --model varcnn
+```
+
+输出 JSON（包含 accuracy、precision/recall/F1、混淆矩阵、分类报告）：
+
+```bash
+python tools/wf_attack_runner.py --features-npz out/features.npz --model rf \
+  --output-json out/wf_metrics_rf.json
+```
+
+批量运行全部模型并输出准确率汇总：
+
+```bash
+python tools/wf_attack_batch.py --features-npz out/features.npz \
+  --output-json out/wf_metrics_all.json
+```
+
+绘制混淆矩阵热力图：
+
+```bash
+python tools/wf_plot_confusion.py --metrics-json out/wf_metrics_rf.json \
+  --output out/confusion_matrix.png --normalize --title "RF Confusion Matrix"
+```
+
+绘制多路径/正常流量识别率对比柱状图：
+
+```bash
+python tools/wf_plot_accuracy.py \
+  --multipath 20.7,58.5,24.6,41.2,4 \
+  --normal 50.6,89.3,62.8,80.1,6.1 \
+  --output out/accuracy_compare.png
+```
+
 ## 基于 PCAP 的 JS 散度与雷达图
 
 使用 PCAP 统计特征分布的 JS 散度，并生成“特征拟合雷达图”：
