@@ -152,6 +152,15 @@ python tools/wf_plot_confusion.py --metrics-json out/wf_metrics_rf.json \
   --output out/confusion_matrix.png --normalize --title "RF Confusion Matrix"
 ```
 
+绘制多路径/正常流量识别率对比柱状图：
+
+```bash
+python tools/wf_plot_accuracy.py \
+  --multipath 20.7,58.5,24.6,41.2,4 \
+  --normal 50.6,89.3,62.8,80.1,6.1 \
+  --output out/accuracy_compare.png
+```
+
 ## 基于 PCAP 的 JS 散度与雷达图
 
 使用 PCAP 统计特征分布的 JS 散度，并生成“特征拟合雷达图”：
