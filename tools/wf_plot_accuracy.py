@@ -6,6 +6,17 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
+def configure_fonts() -> None:
+    plt.rcParams["font.sans-serif"] = [
+        "SimHei",
+        "Noto Sans CJK SC",
+        "Microsoft YaHei",
+        "Arial Unicode MS",
+        "DejaVu Sans",
+    ]
+    plt.rcParams["axes.unicode_minus"] = False
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="绘制多路径/正常流量识别率对比柱状图")
     parser.add_argument(
@@ -53,23 +64,24 @@ def main() -> None:
     normal = parse_values(args.normal)
     labels = ["SVM", "RF", "CNN", "DF", "VarCNN"]
 
+    configure_fonts()
     x = list(range(len(labels)))
     offset = args.bar_width / 2 + args.bar_gap / 2
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    bars_multi = ax.bar(
-        [pos - offset for pos in x],
-        multipath,
-        width=args.bar_width,
-        color="#4C78A8",
-        label="多路径流量",
-    )
     bars_norm = ax.bar(
-        [pos + offset for pos in x],
+        [pos - offset for pos in x],
         normal,
         width=args.bar_width,
         color="#E45756",
         label="正常流量",
+    )
+    bars_multi = ax.bar(
+        [pos + offset for pos in x],
+        multipath,
+        width=args.bar_width,
+        color="#4C78A8",
+        label="多路径流量",
     )
 
     ax.set_title(args.title, fontsize=args.label_font_size)
@@ -103,8 +115,8 @@ def main() -> None:
                 fontsize=args.font_size - 1,
             )
 
-    add_labels(bars_multi)
     add_labels(bars_norm)
+    add_labels(bars_multi)
 
     fig.tight_layout()
     args.output.parent.mkdir(parents=True, exist_ok=True)
