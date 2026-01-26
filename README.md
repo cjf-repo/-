@@ -138,6 +138,20 @@ python tools/wf_attack_runner.py --features-npz out/features.npz --model rf \
   --output-json out/wf_metrics_rf.json
 ```
 
+批量运行全部模型并输出准确率汇总：
+
+```bash
+python tools/wf_attack_batch.py --features-npz out/features.npz \
+  --output-json out/wf_metrics_all.json
+```
+
+绘制混淆矩阵热力图：
+
+```bash
+python tools/wf_plot_confusion.py --metrics-json out/wf_metrics_rf.json \
+  --output out/confusion_matrix.png --normalize --title "RF Confusion Matrix"
+```
+
 ## 基于 PCAP 的 JS 散度与雷达图
 
 使用 PCAP 统计特征分布的 JS 散度，并生成“特征拟合雷达图”：
