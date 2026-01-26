@@ -6,6 +6,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,7 +87,9 @@ def main() -> None:
     im_right = render(axes[1], obf_matrix, args.title_obfuscated, obf_acc)
     axes[1].set_ylabel("")
 
-    cbar = fig.colorbar(im_right, ax=axes.ravel().tolist(), fraction=0.046, pad=0.04)
+    divider = make_axes_locatable(axes[1])
+    cax = divider.append_axes("right", size="4%", pad=0.15)
+    cbar = fig.colorbar(im_right, cax=cax)
     cbar.ax.tick_params(labelsize=args.font_size)
     cbar.set_label("预测概率 (Probability)" if args.normalize else "计数 (Count)", fontsize=args.font_size + 1)
 
