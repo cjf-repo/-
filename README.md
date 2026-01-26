@@ -145,11 +145,13 @@ python tools/wf_attack_batch.py --features-npz out/features.npz \
   --output-json out/wf_metrics_all.json
 ```
 
-绘制混淆矩阵热力图：
+绘制混淆矩阵热力图（正常/伪装对比）：
 
 ```bash
-python tools/wf_plot_confusion.py --metrics-json out/wf_metrics_rf.json \
-  --output out/confusion_matrix.png --normalize --title "RF Confusion Matrix"
+python tools/wf_plot_confusion.py \
+  --metrics-normal out/wf_metrics_rf_normal.json \
+  --metrics-obfuscated out/wf_metrics_rf_obfuscated.json \
+  --output out/confusion_matrix_compare.png --normalize
 ```
 
 绘制多路径/正常流量识别率对比柱状图：
