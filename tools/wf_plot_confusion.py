@@ -6,7 +6,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def parse_args() -> argparse.Namespace:
@@ -18,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title-obfuscated", type=str, default="(b) 多路径传输场景（DS-Multipath）")
     parser.add_argument("--normalize", action="store_true", help="按行归一化显示百分比")
     parser.add_argument("--max-labels", type=int, default=50, help="最多展示的类别数（过多会裁剪）")
-    parser.add_argument("--font-size", type=int, default=8)
+    parser.add_argument("--font-size", type=int, default=10)
     return parser.parse_args()
 
 
@@ -67,7 +66,13 @@ def main() -> None:
     obf_matrix = crop_matrix(obf_matrix, args.max_labels)
 
     size = max(normal_matrix.shape[0], obf_matrix.shape[0])
-    fig, axes = plt.subplots(1, 2, figsize=(max(10, size * 0.5), max(5, size * 0.4)))
+    plt.rcParams.update({"font.size": args.font_size})
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(max(11, size * 0.55), max(5.5, size * 0.45)),
+        gridspec_kw={"width_ratios": [1, 1, 0.05], "wspace": 0.25},
+    )
     cmap = plt.get_cmap("Blues")
 
     def render(ax, matrix: np.ndarray, title: str, accuracy: float | None) -> None:
@@ -87,9 +92,7 @@ def main() -> None:
     im_right = render(axes[1], obf_matrix, args.title_obfuscated, obf_acc)
     axes[1].set_ylabel("")
 
-    divider = make_axes_locatable(axes[1])
-    cax = divider.append_axes("right", size="4%", pad=0.15)
-    cbar = fig.colorbar(im_right, cax=cax)
+    cbar = fig.colorbar(im_right, cax=axes[2])
     cbar.ax.tick_params(labelsize=args.font_size)
     cbar.set_label("预测概率 (Probability)" if args.normalize else "计数 (Count)", fontsize=args.font_size + 1)
 

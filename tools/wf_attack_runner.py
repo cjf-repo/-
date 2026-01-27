@@ -207,7 +207,7 @@ def train_deep(
 
     tf.random.set_seed(args.random_state)
     model = build_deep_model(model_type, x_train.shape[1:], len(encoder.classes_), args)
-    model.fit(
+    history = model.fit(
         x_train,
         y_train_enc,
         epochs=args.epochs,
@@ -216,7 +216,9 @@ def train_deep(
     )
     preds = model.predict(x_test, verbose=0)
     pred_labels = encoder.inverse_transform(np.argmax(preds, axis=1))
-    return summarize_metrics(y_test, pred_labels)
+    metrics = summarize_metrics(y_test, pred_labels)
+    metrics["training_loss"] = [float(value) for value in history.history.get("loss", [])]
+    return metrics
 
 
 def main() -> None:
