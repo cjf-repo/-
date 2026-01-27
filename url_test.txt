@@ -1,1 +1,4 @@
-www.huawei.com
+www.baidu.com
+www.qq.com
+www.sohu.com
+www.sina.com.cn
