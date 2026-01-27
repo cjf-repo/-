@@ -16,8 +16,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title-normal", type=str, default="(a) 基准单路径场景（DS-Normal）")
     parser.add_argument("--title-obfuscated", type=str, default="(b) 多路径传输场景（DS-Multipath）")
     parser.add_argument("--normalize", action="store_true", help="按行归一化显示百分比")
-    parser.add_argument("--max-labels", type=int, default=50, help="最多展示的类别数（过多会裁剪）")
-    parser.add_argument("--font-size", type=int, default=10)
+    parser.add_argument("--max-labels", type=int, default=100, help="最多展示的类别数（过多会裁剪）")
+    parser.add_argument("--font-size", type=int, default=10, help="坐标轴刻度字体大小")
+    parser.add_argument("--cbar-font-size", type=int, default=30, help="颜色条刻度字体大小（单独控制）")
+    parser.add_argument("--axis-label-size", type=int, default=50, help="x/y轴标签（Predicted/True）字体大小")
     return parser.parse_args()
 
 
@@ -56,46 +58,42 @@ def crop_matrix(matrix: np.ndarray, max_labels: int) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
-    configure_fonts()
-    normal_matrix, normal_acc = load_confusion(args.metrics_normal)
-    obf_matrix, obf_acc = load_confusion(args.metrics_obfuscated)
+    matrix = load_confusion(args.metrics_json)
+    
+    # 归一化处理
     if args.normalize:
         normal_matrix = normalize_matrix(normal_matrix)
         obf_matrix = normalize_matrix(obf_matrix)
     normal_matrix = crop_matrix(normal_matrix, args.max_labels)
     obf_matrix = crop_matrix(obf_matrix, args.max_labels)
 
-    size = max(normal_matrix.shape[0], obf_matrix.shape[0])
-    plt.rcParams.update({"font.size": args.font_size})
-    fig, axes = plt.subplots(
-        1,
-        3,
-        figsize=(max(11, size * 0.55), max(5.5, size * 0.45)),
-        gridspec_kw={"width_ratios": [1, 1, 0.05], "wspace": 0.25},
-    )
+    # 裁剪矩阵到最大类别数
+    size = matrix.shape[0]
+    if size > args.max_labels:
+        matrix = matrix[: args.max_labels, : args.max_labels]
+        size = args.max_labels
+
+    # 创建画布和子图
+    fig, ax = plt.subplots(figsize=(max(6, size * 0.4), max(5, size * 0.4)))
     cmap = plt.get_cmap("Blues")
+    im = ax.imshow(matrix, cmap=cmap)
+    
+    # 设置标题和坐标轴标签（使用单独的轴标签字体大小参数）
+    ax.set_title(args.title, fontsize=30)
+    ax.set_xlabel("Predicted Label", fontsize=args.axis_label_size)
+    ax.set_ylabel("True Label", fontsize=args.axis_label_size)
+    
+    # 设置坐标轴刻度
+    ax.set_xticks(range(size))
+    ax.set_yticks(range(size))
+    ax.tick_params(axis="both", which="major", labelsize=args.font_size)
 
-    def render(ax, matrix: np.ndarray, title: str, accuracy: float | None) -> None:
-        im = ax.imshow(matrix, cmap=cmap, vmin=0.0, vmax=1.0 if args.normalize else None)
-        subtitle = title
-        if accuracy is not None:
-            subtitle = f"{title}\n准确率 ~{accuracy * 100:.1f}%"
-        ax.set_title(subtitle, fontsize=args.font_size + 2)
-        ax.set_xlabel("预测网站类别索引 (Predicted Label Index)", fontsize=args.font_size + 1)
-        ax.set_ylabel("真实网站类别索引 (True Label Index)", fontsize=args.font_size + 1)
-        ax.set_xticks(range(matrix.shape[0]))
-        ax.set_yticks(range(matrix.shape[0]))
-        ax.tick_params(axis="both", which="major", labelsize=args.font_size)
-        return im
-
-    im_left = render(axes[0], normal_matrix, args.title_normal, normal_acc)
-    im_right = render(axes[1], obf_matrix, args.title_obfuscated, obf_acc)
-    axes[1].set_ylabel("")
-
-    cbar = fig.colorbar(im_right, cax=axes[2])
-    cbar.ax.tick_params(labelsize=args.font_size)
-    cbar.set_label("预测概率 (Probability)" if args.normalize else "计数 (Count)", fontsize=args.font_size + 1)
-
+    
+    # 关键修改：设置颜色条刻度字体大小（使用新增的cbar-font-size参数）
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=args.cbar_font_size)  # 改用单独的颜色条字体参数
+    
+    # 保存图片
     fig.tight_layout()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, dpi=200)

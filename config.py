@@ -41,9 +41,9 @@ class Config:
     server_host: str = "127.0.0.1"
     server_port: int = 9301
     # 服务器模式：echo（本地回显）/ forward（转发外部真实服务）
-    server_mode: str = "echo"
+    server_mode: str = "forward"
     # 入口是否作为 HTTP 代理（仅支持明文 HTTP）
-    proxy_mode: bool = False
+    proxy_mode: bool = True
 
     # 窗口大小（秒）
     window_size_sec: int = 10
@@ -75,7 +75,7 @@ class Config:
     adaptive_proto: bool = True
 
     # 多路径开关
-    enable_multipath: bool = True
+    enable_multipath: bool = False
     # 行为伪装开关（整形/填充/抖动/限速）
     enable_behavior: bool = True
     # 属性伪装开关（协议模板/握手/编码）
