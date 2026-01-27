@@ -1,0 +1,36 @@
+# 忽略 out 文件夹（核心需求）
+out/
+
+# Python 缓存文件（覆盖所有版本的 .pyc 文件）
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+
+# VSCode 配置
+.vscode/
+
+# 生成的图片文件
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+# 日志文件
+*.log
+
+# 数据文件
+*.npz
+*.csv
+*.txt  # 如果 url.txt/url_test.txt 是临时测试文件，可忽略；如需保留则删除此行
+
+# 配置实例（如果是临时测试配置，可忽略）
+configs/instances/new_test/
+
+# 其他临时文件
+*.tmp
+*.swp
+.DS_Store
