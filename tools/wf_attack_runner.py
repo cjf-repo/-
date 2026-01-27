@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--output-json", type=Path, default=Path("out/wf_metrics.json"))
     parser.add_argument("--epochs", type=int, default=20, help="深度模型训练轮数")
+    parser.add_argument("--early-stop-patience", type=int, default=0, help="提前停止训练的耐心值(0 表示关闭)")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--dropout", type=float, default=0.5)
@@ -207,12 +208,23 @@ def train_deep(
 
     tf.random.set_seed(args.random_state)
     model = build_deep_model(model_type, x_train.shape[1:], len(encoder.classes_), args)
+    callbacks: list[object] = []
+    if args.early_stop_patience > 0:
+        callbacks.append(
+            tf.keras.callbacks.EarlyStopping(
+                monitor="loss",
+                patience=args.early_stop_patience,
+                min_delta=1e-4,
+                restore_best_weights=True,
+            )
+        )
     history = model.fit(
         x_train,
         y_train_enc,
         epochs=args.epochs,
         batch_size=args.batch_size,
         verbose=2,
+        callbacks=callbacks,
     )
     preds = model.predict(x_test, verbose=0)
     pred_labels = encoder.inverse_transform(np.argmax(preds, axis=1))
