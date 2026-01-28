@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ import signal
 import threading
 import queue
 import json
+import itertools
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, Future
 from typing import Iterable
 from urllib.parse import urlparse
@@ -133,6 +135,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="失败重试间隔秒数",
+    )
+    parser.add_argument(
+        "--latency-log",
+        default=None,
+        help="写入 latency_logs.jsonl 的路径（默认使用 OUT_DIR 或 out/<run_id>）",
     )
     return parser.parse_args()
 
@@ -280,6 +287,10 @@ def main() -> None:
         raise SystemExit("--retry 必须 >= 0")
     if args.max_pending < 0:
         raise SystemExit("--max-pending 必须 >= 0")
+    run_id = os.environ.get("RUN_ID") or time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+    out_dir = Path(os.environ.get("OUT_DIR") or f"out/{run_id}")
+    latency_log_path = Path(args.latency_log) if args.latency_log else (out_dir / "latency_logs.jsonl")
+    latency_log_path.parent.mkdir(parents=True, exist_ok=True)
     proxies = parse_proxies(args.proxy, args.proxy_list, args.config_list)
     proxy_config_map = parse_proxy_configs(args.proxy_configs, proxies, args.config_list)
 
@@ -333,6 +344,15 @@ def main() -> None:
     failure_entries: list[str] = []
     cmd_lines: list[str] = []
     cmd_lock = threading.Lock()
+    latency_lock = threading.Lock()
+    seq_counter = itertools.count(1)
+
+    def write_latency_log(record: dict[str, object]) -> None:
+        payload = json.dumps(record, ensure_ascii=False)
+        with latency_lock:
+            with latency_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(payload + "\n")
+
     def iter_tasks() -> Iterable[tuple[str, int]]:
         for url in urls:
             for count in range(1, args.times + 1):
@@ -383,7 +403,20 @@ def main() -> None:
                         print(cmd_line, flush=True)
             attempts = args.retry + 1
             for attempt in range(attempts):
+                start_ts = time.monotonic()
                 code = run_curl(cmd)
+                latency_ms = (time.monotonic() - start_ts) * 1000
+                write_latency_log(
+                    {
+                        "seq": next(seq_counter),
+                        "ok": code == 0,
+                        "latency_ms": latency_ms,
+                        "url": url,
+                        "proxy": proxy,
+                        "attempt": attempt + 1,
+                        "attempts": attempts,
+                    }
+                )
                 if code == 0:
                     return code
                 if attempt < attempts - 1 and args.retry_delay > 0:
