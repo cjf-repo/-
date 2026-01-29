@@ -32,6 +32,18 @@ def parse_args() -> argparse.Namespace:
         help="正常流量识别率（逗号分隔，顺序: svm,rf,cnn,df,varcnn）",
     )
     parser.add_argument(
+        "--third",
+        type=str,
+        default=None,
+        help="第三类识别率（逗号分隔，顺序: svm,rf,cnn,df,varcnn）",
+    )
+    parser.add_argument(
+        "--third-label",
+        type=str,
+        default="第三类流量",
+        help="第三类图例名称",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("out/accuracy_compare.png"),
@@ -41,11 +53,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--note",
         type=str,
-        default="注：识别率越低，表明流量伪装效果越好",
+        default="",
         help="标题下方注释",
     )
     parser.add_argument("--bar-width", type=float, default=0.35)
-    parser.add_argument("--bar-gap", type=float, default=0.15, help="同组柱子间距")
+    parser.add_argument("--bar-gap", type=float, default=0, help="同组柱子间距")
     parser.add_argument("--font-size", type=int, default=11)
     parser.add_argument("--label-font-size", type=int, default=12)
     return parser.parse_args()
@@ -62,27 +74,40 @@ def main() -> None:
     args = parse_args()
     multipath = parse_values(args.multipath)
     normal = parse_values(args.normal)
+    third = parse_values(args.third) if args.third is not None else None
     labels = ["SVM", "RF", "CNN", "DF", "VarCNN"]
 
     configure_fonts()
     x = list(range(len(labels)))
-    offset = args.bar_width / 2 + args.bar_gap / 2
+    series_count = 2 if third is None else 3
+    group_width = series_count * args.bar_width + (series_count - 1) * args.bar_gap
+    start_offset = -group_width / 2 + args.bar_width / 2
+    offsets = [start_offset + i * (args.bar_width + args.bar_gap) for i in range(series_count)]
 
     fig, ax = plt.subplots(figsize=(9, 5))
     bars_norm = ax.bar(
-        [pos - offset for pos in x],
+        [pos + offsets[0] for pos in x],
         normal,
         width=args.bar_width,
         color="#E45756",
         label="正常流量",
     )
     bars_multi = ax.bar(
-        [pos + offset for pos in x],
+        [pos + offsets[1] for pos in x],
         multipath,
         width=args.bar_width,
         color="#4C78A8",
         label="多路径流量",
     )
+    bars_third = None
+    if third is not None:
+        bars_third = ax.bar(
+            [pos + offsets[2] for pos in x],
+            third,
+            width=args.bar_width,
+            color="#54A24B",
+            label=args.third_label,
+        )
 
     ax.set_title(args.title, fontsize=args.label_font_size)
     ax.text(
@@ -117,6 +142,8 @@ def main() -> None:
 
     add_labels(bars_norm)
     add_labels(bars_multi)
+    if bars_third is not None:
+        add_labels(bars_third)
 
     fig.tight_layout()
     args.output.parent.mkdir(parents=True, exist_ok=True)

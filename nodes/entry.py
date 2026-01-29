@@ -19,6 +19,7 @@ from frames import (
     FLAG_FRAGMENT,
     FLAG_HANDSHAKE,
     FLAG_PADDING,
+    FLAG_PROBE,
     Frame,
     FragmentBuffer,
 )
@@ -120,6 +121,9 @@ class EntrySession:
         self._pending_down_ts: Dict[int, float] = {}
         self._next_down_wait_ts: float | None = None
         self._downlink_state: dict | None = None
+        self._probe_task: asyncio.Task | None = None
+        self.threat_level = max(0, min(3, config.threat_level))
+        self.threat_mode = config.threat_mode.lower()
         # 协议族/变体映射
         self.family_by_path: Dict[int, int] = {
             path_id: 1 for path_id in range(len(self.active_middle_ports))
@@ -150,7 +154,11 @@ class EntrySession:
                     self.timeout_events += 1
             self.window_id += 1
             metrics = self.scheduler.snapshot()
-            output = self.strategy.evaluate(metrics, self.timeout_events, self.window_id)
+            mean_loss = sum(stats["loss"] for stats in metrics.values()) / max(len(metrics), 1)
+            mean_rtt = sum(stats["rtt_ms"] for stats in metrics.values()) / max(len(metrics), 1)
+            self._update_threat_level(mean_rtt, mean_loss, self.timeout_events)
+            effective_level = self._apply_quality_penalty(self.threat_level, mean_rtt, mean_loss)
+            output = self.strategy.evaluate(metrics, self.timeout_events, self.window_id, effective_level)
             # 更新调度权重与行为参数
             self.scheduler.update_weights(output.weights)
             self.family_by_path = output.family_by_path
@@ -174,6 +182,8 @@ class EntrySession:
                     "window_id": self.window_id,
                     "path_id": path_id,
                     "obfuscation_level": output.obfuscation_level,
+                    "threat_level": self.threat_level,
+                    "effective_obf_level": output.obfuscation_level,
                     "alpha_padding": behavior.padding_alpha,
                     "rate_bytes_per_sec": behavior.rate_bytes_per_sec,
                     "jitter_ms": behavior.jitter_ms,
@@ -203,6 +213,27 @@ class EntrySession:
                     downlink_state["delivered_response_len"],
                 )
             self.timeout_events = 0
+
+    def _apply_quality_penalty(self, level: int, mean_rtt: float, mean_loss: float) -> int:
+        penalty = 0
+        if mean_loss > 0.4 or mean_rtt > 500:
+            penalty = 2
+        elif mean_loss > 0.2 or mean_rtt > 250:
+            penalty = 1
+        return max(0, min(3, level - penalty))
+
+    def _update_threat_level(self, mean_rtt: float, mean_loss: float, timeout_events: int) -> None:
+        if self.threat_mode == "fixed":
+            self.threat_level = max(0, min(3, self.config.threat_level))
+            return
+        if self.threat_mode == "random":
+            self.threat_level = random.randint(0, 3)
+            return
+        # auto 模式：基于异常事件与质量波动调节威胁等级
+        if timeout_events > 2 or mean_loss > 0.2:
+            self.threat_level = min(3, self.threat_level + 1)
+        elif timeout_events == 0 and mean_loss < 0.05 and mean_rtt < 120:
+            self.threat_level = max(0, self.threat_level - 1)
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 发送握手帧，建立协议上下文
@@ -259,6 +290,8 @@ class EntrySession:
                 delivered_response_len,
             )
         )
+        if self._probe_task is None and self.config.probe_interval_sec > 0:
+            self._probe_task = asyncio.create_task(self.probe_loop(path_conns))
         try:
             while True:
                 if close_after_response[0]:
@@ -306,6 +339,15 @@ class EntrySession:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
             downlink_task.cancel()
+            if self._probe_task is not None:
+                self._probe_task.cancel()
+                try:
+                    await self._probe_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    LOGGER.debug("探测任务结束异常 %s", exc)
+                self._probe_task = None
             if self._window_task is not None:
                 self._window_task.cancel()
                 try:
@@ -338,6 +380,36 @@ class EntrySession:
                 bytes_from_client,
                 bytes_to_client[0],
             )
+
+    async def probe_loop(self, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
+        # 主动探测：定期发送小探测帧，更新 RTT/丢包
+        while True:
+            await asyncio.sleep(self.config.probe_interval_sec)
+            for path_id, (_, writer) in enumerate(path_conns):
+                seq = self.seq_counter
+                self.seq_counter += 1
+                payload = random.randbytes(self.config.probe_payload_len)
+                frame = Frame(
+                    session_id=self.session_id,
+                    seq=seq,
+                    direction=DIR_UP,
+                    path_id=path_id,
+                    window_id=self.window_id,
+                    proto_id=self.family_by_path.get(path_id, 1),
+                    flags=FLAG_PROBE,
+                    frag_id=0,
+                    frag_total=1,
+                    payload=payload,
+                )
+                if self.config.enable_obfuscation:
+                    frame = self.proto.apply(frame, frame.proto_id, self.variant_by_path.get(path_id, 0))
+                    frame = self.proto.encode_payload(frame, frame.proto_id, self.variant_by_path.get(path_id, 0))
+                try:
+                    writer.write(frame.encode())
+                    await writer.drain()
+                    self.scheduler.mark_sent(path_id, seq)
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    continue
 
     def parse_proxy_request(
         self, header: bytes
@@ -591,7 +663,7 @@ class EntrySession:
                 seq = ACK_STRUCT.unpack(frame.payload)[0]
                 self.scheduler.mark_ack(frame.path_id, seq)
                 continue
-            if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE):
+            if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_PROBE):
                 continue
             if frame.direction != DIR_DOWN:
                 continue

@@ -18,6 +18,7 @@ from frames import (
     FLAG_FRAGMENT,
     FLAG_HANDSHAKE,
     FLAG_PADDING,
+    FLAG_PROBE,
     Frame,
     FragmentBuffer,
 )
@@ -139,6 +140,9 @@ class ExitNode:
                 path_id = frame.path_id
                 session_writers = self._path_writers.setdefault(session_id, {})
                 session_writers[path_id] = writer
+                if frame.flags & FLAG_PROBE:
+                    await self.send_ack(frame)
+                    continue
                 if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_ACK):
                     continue
                 if self.config.enable_obfuscation:
@@ -439,7 +443,7 @@ class ExitNode:
             await asyncio.sleep(self.config.window_size_sec)
             self.window_id += 1
             metrics = self.scheduler.snapshot()
-            output = self.strategy.evaluate(metrics, 0, self.window_id)
+            output = self.strategy.evaluate(metrics, 0, self.window_id, self.config.obfuscation_level)
             # 更新调度与行为参数
             self.scheduler.update_weights(output.weights)
             self.family_by_path = output.family_by_path

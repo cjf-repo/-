@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("out/loss_compare.png"))
     parser.add_argument("--title", type=str, default="DF模型训练过程中的损失函数(Loss)变化对比")
     parser.add_argument("--label-normal", type=str, default="基准场景 (Normal)")
-    parser.add_argument("--label-obfuscated", type=str, default="防御场景 (Multipath)")
+    parser.add_argument("--label-obfuscated", type=str, default="防御场景 (Obfuscation)")
     parser.add_argument("--epochs", type=int, nargs="+", default=list(range(0, 420, 20)))
     parser.add_argument("--font-size", type=int, default=10)
     return parser.parse_args()

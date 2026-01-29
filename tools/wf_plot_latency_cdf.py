@@ -14,9 +14,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latency-normal", type=Path, required=True, help="基准场景 latency_logs.jsonl")
     parser.add_argument("--latency-obfuscated", type=Path, required=True, help="防御场景 latency_logs.jsonl")
     parser.add_argument("--output", type=Path, default=Path("out/latency_cdf.png"))
-    parser.add_argument("--title", type=str, default="图 3-7 不同传输模式下的端到端时延分布对比图 (CDF)")
+    parser.add_argument("--title", type=str, default="不同传输模式下的端到端时延分布对比图 (CDF)")
     parser.add_argument("--label-normal", type=str, default="基准场景 (Normal)")
-    parser.add_argument("--label-obfuscated", type=str, default="防御场景 (Multipath)")
+    parser.add_argument("--label-obfuscated", type=str, default="防御场景 (Obfuscation)")
     parser.add_argument("--font-size", type=int, default=10)
     parser.add_argument(
         "--max-latency-ms",

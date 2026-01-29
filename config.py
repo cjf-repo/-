@@ -83,6 +83,15 @@ class Config:
     # 中继 trace 记录开关
     enable_trace: bool = True
 
+    # 主动探测间隔（秒，<=0 禁用）
+    probe_interval_sec: float = 1.0
+    # 探测载荷长度（字节）
+    probe_payload_len: int = 8
+    # 威胁等级模式（auto/fixed/random）
+    threat_mode: str = "auto"
+    # 固定威胁等级（0-3）
+    threat_level: int = 2
+
     # ACK 超时时间
     ack_timeout_sec: float = 2.0
 
@@ -186,6 +195,10 @@ def load_config_from_env() -> Config:
     config.enable_trace = _env_bool("ENABLE_TRACE", config.enable_trace)
     config.capture_pcap = _env_bool("CAPTURE_PCAP", config.capture_pcap)
     config.capture_dir = os.environ.get("CAPTURE_DIR") or config.capture_dir
+    config.probe_interval_sec = _env_float("PROBE_INTERVAL_SEC", config.probe_interval_sec)
+    config.probe_payload_len = _env_int("PROBE_PAYLOAD_LEN", config.probe_payload_len)
+    config.threat_mode = _env_str("THREAT_MODE", config.threat_mode)
+    config.threat_level = _env_int("THREAT_LEVEL", config.obfuscation_level)
     # 如提供 SEED 则固定随机种子
     seed = os.environ.get("SEED")
     if seed is not None:

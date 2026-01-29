@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-estimators", type=int, default=200)
     parser.add_argument("--max-depth", type=int, default=0, help="0 表示不限制深度")
     parser.add_argument("--kernel", type=str, default="rbf")
-    parser.add_argument("--C", type=float, default=1.0)
+    parser.add_argument("--C", type=float, default=1)
     parser.add_argument("--gamma", type=str, default="scale")
     parser.add_argument("--class-weight", type=str, default="balanced")
     return parser.parse_args()

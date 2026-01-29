@@ -65,6 +65,7 @@ class StrategyEngine:
         metrics: Dict[int, Dict[str, float]],
         timeout_events: int,
         window_id: int,
+        obfuscation_level: int,
     ) -> StrategyOutput:
         # 简化的规则引擎：根据 RTT/丢包调整权重与行为参数
         weights: Dict[int, float] = {}
@@ -89,7 +90,7 @@ class StrategyEngine:
         rate = self.base_rate
         drift = 0.02
         burst = 6
-        level = self.obfuscation_level
+        level = obfuscation_level
         enable_shaping = True
         enable_padding = True
         enable_pacing = True
