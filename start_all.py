@@ -82,7 +82,7 @@ async def run() -> None:
                 json_log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 json_log_file.flush()
     # 启动目标服务（外部真实服务模式可跳过）
-    if os.environ.get("EXTERNAL_SERVER") != "1":
+    if not config.external_server and os.environ.get("EXTERNAL_SERVER") != "1":
         server_proc = await asyncio.create_subprocess_exec(
             python,
             "-m",

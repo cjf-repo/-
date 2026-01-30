@@ -16,16 +16,17 @@ Server -> Exit -> Middle_i -> Entry -> ClientApp
 
 - 多跳、多路径隧道，带加权批量调度。
 - 行为整形（包尺寸分桶、填充预算、抖动）。
-- 属性伪装（3种协议模板可轮换）。
+- 属性伪装（TLS/HTTP/通用二进制三类外观模板轮换）。
 - 基于 ACK 的 RTT/丢包估计。
+- 主动探测与威胁等级自适应（动态调整伪装强度）。
 - 按时间窗动态更新策略。
 
 ## 目录结构
 
 - `config.py`：集中配置。
 - `frames.py`：二进制帧格式与分片重组。
-- `profiles.py`：协议模板与握手模式。
-- `obfuscation.py`：协议伪装器（模板选择 + 头部变体）。
+- `profiles.py`：协议族/变体模板、握手序列与轻量头部封装。
+- `obfuscation.py`：协议伪装器（模板选择 + 头部封装 + 载荷混淆）。
 - `behavior.py`：行为整形（分桶、填充预算、抖动）。
 - `scheduler.py`：多路径调度器。
 - `strategy.py`：时间窗策略引擎。
@@ -62,8 +63,13 @@ python start_all.py
 - `ENABLE_MULTIPATH`：多路径开关（关闭后强制单路径）
 - `ENABLE_BEHAVIOR`：行为伪装开关（整形/填充/抖动/限速）
 - `ENABLE_OBFUSCATION`：属性伪装开关（协议模板/握手/编码）
+- `PROBE_INTERVAL_SEC`：主动探测间隔（秒，<=0 禁用）
+- `PROBE_PAYLOAD_LEN`：探测载荷长度（字节）
+- `THREAT_MODE`：威胁等级模式（`auto` / `fixed` / `random`）
+- `THREAT_LEVEL`：固定威胁等级（0~3，`THREAT_MODE=fixed` 时生效）
 - `SERVER_HOST` / `SERVER_PORT`：外部目标服务地址与端口
 - `SERVER_MODE`：目标服务模式（`echo` / `forward`）
+- `EXTERNAL_SERVER`：跳过本地 echo server，直接连接外部服务（亦可在配置文件中设 `external_server=true`）
 - `PROXY_MODE`：入口是否作为 HTTP 代理（仅支持明文 HTTP）
 - `SEED`：随机种子
 - `RUN_ID` / `OUT_DIR`：输出目录控制
@@ -198,6 +204,7 @@ python -m nodes.client_app --url http://example.com/
 
 - 入口/中继/出口仍按多路径 + 行为伪装 + 属性伪装传输。
 - 真实流量模式下客户端会发送 HTTP 请求并读取响应。
+- 属性伪装中的 TLS/HTTP 为“轻量外观封装”，不等价于真实协议语义。
 - HTTPS 场景目前未做 TLS 透传封装，如需 HTTPS 可在后续扩展为 SOCKS/CONNECT 或透明转发。
 
 ## 入口作为 HTTP 代理（curl/浏览器）
@@ -317,7 +324,7 @@ python start_all.py --config config_ports.json
 ## 输出字段简要说明
 
 - `window_logs.jsonl`：每条记录包含 `window_id/path_id`、策略参数、`proto_family/variant`、
-  `padding_bytes/real_bytes`、RTT/丢包、以及自适应触发信息。
+  `padding_bytes/real_bytes`、RTT/丢包、威胁等级与自适应触发信息。
 - `latency_logs.jsonl`：逐条消息的 `latency_ms` 与成功标记。
 - `traces/`：`trace_session_*_path_*_TM1.csv` 与 `trace_session_*_path_*_TM2.csv`。
 
@@ -368,7 +375,7 @@ python -m tools.pcap_reader --pcap path/to/file.pcap --port 9101 --port 9102
 实时监控输出中常见字段含义：
 
 - `proto`：协议模板编号（用于属性伪装对比）
-- `flags`：帧标记（握手/分片/填充/ACK）
+- `flags`：帧标记（握手/分片/填充/ACK/PROBE）
 - `extra`：额外头长度（不同模板范围不同）
 - `frag=a/b`：分片编号与分片总数
 
@@ -389,5 +396,6 @@ python -m tools.pcap_reader --pcap path/to/file.pcap --port 9101 --port 9102
 ## 备注
 
 - 帧头为固定结构，并包含“额外头字段长度”以便协议伪装。
+- 协议外观封装为轻量化模板（TLS/HTTP/BIN），不包含完整协议语义。
 - ACK 帧在 payload 中携带确认的 `seq`。
 - 本原型便于后续扩展（如抓包/日志、SOCKS/TUN 入口等）。

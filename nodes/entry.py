@@ -408,6 +408,7 @@ class EntrySession:
                     writer.write(frame.encode())
                     await writer.drain()
                     self.scheduler.mark_sent(path_id, seq)
+                    LOGGER.info("PROBE 发送 path=%s seq=%s len=%s", path_id, seq, len(payload))
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
                     continue
 

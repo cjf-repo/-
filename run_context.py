@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import random
@@ -28,16 +29,40 @@ class RunContext:
     window_log_path: Path
     # 延迟日志路径
     latency_log_path: Path
+    # 缓冲区
+    _window_buffer: list[str]
+    _latency_buffer: list[str]
+    _last_flush_ts: float
+
+    def _maybe_flush(self, *, force: bool = False) -> None:
+        # 批量写入，降低 IO 频率
+        buffer_size = int(os.environ.get("LOG_BUFFER_SIZE", "100"))
+        flush_interval = float(os.environ.get("LOG_FLUSH_SEC", "0.5"))
+        now = time.monotonic()
+        should_flush = force or len(self._window_buffer) + len(self._latency_buffer) >= buffer_size
+        if not should_flush and (now - self._last_flush_ts) >= flush_interval:
+            should_flush = True
+        if not should_flush:
+            return
+        if self._window_buffer:
+            with self.window_log_path.open("a", encoding="utf-8") as handle:
+                handle.write("".join(self._window_buffer))
+            self._window_buffer.clear()
+        if self._latency_buffer:
+            with self.latency_log_path.open("a", encoding="utf-8") as handle:
+                handle.write("".join(self._latency_buffer))
+            self._latency_buffer.clear()
+        self._last_flush_ts = now
 
     def write_window_log(self, record: Dict[str, Any]) -> None:
         # 追加写窗口日志（JSONL）
-        with self.window_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._window_buffer.append(json.dumps(record, ensure_ascii=False) + "\n")
+        self._maybe_flush()
 
     def write_latency_log(self, record: Dict[str, Any]) -> None:
         # 追加写延迟日志（JSONL）
-        with self.latency_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._latency_buffer.append(json.dumps(record, ensure_ascii=False) + "\n")
+        self._maybe_flush()
 
 
 _CONTEXT: RunContext | None = None
@@ -102,5 +127,9 @@ def get_run_context(config: Config = DEFAULT_CONFIG) -> RunContext:
         seed=seed,
         window_log_path=window_log_path,
         latency_log_path=latency_log_path,
+        _window_buffer=[],
+        _latency_buffer=[],
+        _last_flush_ts=time.monotonic(),
     )
+    atexit.register(_CONTEXT._maybe_flush, force=True)
     return _CONTEXT

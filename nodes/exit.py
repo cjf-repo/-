@@ -103,6 +103,8 @@ class ExitNode:
         self._server_targets: Dict[int, tuple[str, int]] = {}
         self._server_tunnels: Dict[int, bool] = {}
         self._down_seq_counter: Dict[int, int] = {}
+        self._tunnel_tasks: Dict[int, asyncio.Task] = {}
+        self._tunnel_templates: Dict[int, Frame] = {}
         self._window_task: asyncio.Task | None = None
         self.window_id = 0
         # 协议族/变体映射
@@ -141,6 +143,7 @@ class ExitNode:
                 session_writers = self._path_writers.setdefault(session_id, {})
                 session_writers[path_id] = writer
                 if frame.flags & FLAG_PROBE:
+                    LOGGER.info("PROBE 接收 path=%s seq=%s len=%s", frame.path_id, frame.seq, len(frame.payload))
                     await self.send_ack(frame)
                     continue
                 if frame.flags & (FLAG_PADDING | FLAG_HANDSHAKE | FLAG_ACK):
@@ -225,6 +228,11 @@ class ExitNode:
             reader, writer = self._server_conns[session_id]
             # 连接上游 server 的读写需串行，避免并发 readexactly 冲突
             if tunnel_mode and not payload:
+                if session_id not in self._tunnel_tasks:
+                    self._tunnel_templates[session_id] = frame
+                    self._tunnel_tasks[session_id] = asyncio.create_task(
+                        self.relay_tunnel(session_id, reader)
+                    )
                 return
             try:
                 writer.write(payload)
@@ -240,6 +248,13 @@ class ExitNode:
                 self._server_conns[session_id] = (reader, writer)
                 writer.write(payload)
                 await writer.drain()
+            if tunnel_mode:
+                if session_id not in self._tunnel_tasks:
+                    self._tunnel_templates[session_id] = frame
+                    self._tunnel_tasks[session_id] = asyncio.create_task(
+                        self.relay_tunnel(session_id, reader)
+                    )
+                return
             if self.config.server_mode == "echo":
                 response = await reader.readexactly(len(payload))
             else:
@@ -264,6 +279,14 @@ class ExitNode:
         self._server_tunnels.pop(session_id, None)
         self._down_seq_counter.pop(session_id, None)
         self._server_locks.pop(session_id, None)
+        self._fragment_buffers.pop(session_id, None)
+        session_writers = self._path_writers.pop(session_id, {})
+        for writer in session_writers.values():
+            writer.close()
+        task = self._tunnel_tasks.pop(session_id, None)
+        if task is not None:
+            task.cancel()
+        self._tunnel_templates.pop(session_id, None)
         if conn:
             reader, writer = conn
             writer.close()
@@ -313,6 +336,34 @@ class ExitNode:
                 break
             chunks.extend(data)
         return bytes(chunks)
+
+    async def relay_tunnel(self, session_id: int, reader: asyncio.StreamReader) -> None:
+        # CONNECT 隧道：上游数据到下游的流式转发
+        try:
+            while True:
+                data = await reader.read(4096)
+                if not data:
+                    break
+                template = self._tunnel_templates.get(session_id)
+                if template is None:
+                    template = Frame(
+                        session_id=session_id,
+                        seq=0,
+                        direction=DIR_DOWN,
+                        path_id=0,
+                        window_id=self.window_id,
+                        proto_id=1,
+                        flags=FLAG_FRAGMENT,
+                        frag_id=0,
+                        frag_total=1,
+                        payload=b"",
+                    )
+                    self._tunnel_templates[session_id] = template
+                await self.send_downlink(template, data)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass
+        finally:
+            self.close_proxy_session(session_id)
 
     async def read_chunked_body(self, reader: asyncio.StreamReader) -> bytes:
         body = bytearray()

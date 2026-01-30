@@ -4,7 +4,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from frames import Frame
+from frames import FLAG_HANDSHAKE, Frame
 from profiles import ProtoFamily, ProtoVariant, build_handshake_frames, default_profiles
 
 # 协议混淆：基于协议族与变体对帧进行编码/解码与握手伪装。
@@ -55,22 +55,24 @@ class ProtoObfuscator:
         return frame
 
     def encode_payload(self, frame: Frame, family_id: int, variant_id: int) -> Frame:
-        # 编码 payload
+        # 编码 payload（先混淆，再封装）
         family = self.families.get(family_id)
         if family is None:
             return frame
         variant = family.variants[variant_id % len(family.variants)]
-        frame.payload = family.encode_payload(frame.payload, variant)
+        payload = family.encode_payload(frame.payload, variant)
+        frame.payload = family.wrap_payload(payload, direction=frame.direction, handshake=bool(frame.flags & FLAG_HANDSHAKE))
         return frame
 
     def decode_payload(self, frame: Frame) -> Frame:
-        # 解码 payload
+        # 解码 payload（先去封装，再解混淆）
         family = self.families.get(frame.proto_id)
         if family is None:
             return frame
         variant_id = frame.extra_header[0] if frame.extra_header else 0
         variant = family.variants[variant_id % len(family.variants)]
-        frame.payload = family.decode_payload(frame.payload, variant)
+        payload = family.unwrap_payload(frame.payload)
+        frame.payload = family.decode_payload(payload, variant)
         return frame
 
     def handshake_frames(

@@ -42,6 +42,8 @@ class Config:
     server_port: int = 9301
     # 服务器模式：echo（本地回显）/ forward（转发外部真实服务）
     server_mode: str = "forward"
+    # 是否使用外部真实服务（跳过本地 echo server）
+    external_server: bool = False
     # 入口是否作为 HTTP 代理（仅支持明文 HTTP）
     proxy_mode: bool = True
 
@@ -75,16 +77,16 @@ class Config:
     adaptive_proto: bool = True
 
     # 多路径开关
-    enable_multipath: bool = False
+    enable_multipath: bool = True
     # 行为伪装开关（整形/填充/抖动/限速）
-    enable_behavior: bool = False
+    enable_behavior: bool = True
     # 属性伪装开关（协议模板/握手/编码）
-    enable_obfuscation: bool = False
+    enable_obfuscation: bool = True
     # 中继 trace 记录开关
     enable_trace: bool = True
 
     # 主动探测间隔（秒，<=0 禁用）
-    probe_interval_sec: float = 1.0
+    probe_interval_sec: float = 10
     # 探测载荷长度（字节）
     probe_payload_len: int = 8
     # 威胁等级模式（auto/fixed/random）
@@ -153,6 +155,7 @@ def load_config_from_file(path: Path) -> dict:
         "server_host",
         "server_port",
         "server_mode",
+        "external_server",
         "proxy_mode",
         "capture_pcap",
         "capture_dir",
@@ -184,6 +187,7 @@ def load_config_from_env() -> Config:
     config.obfuscation_level = _env_int("OBFUSCATION_LEVEL", config.obfuscation_level)
     config.mode = _env_str("MODE", config.mode)
     config.server_mode = _env_str("SERVER_MODE", config.server_mode)
+    config.external_server = _env_bool("EXTERNAL_SERVER", config.external_server)
     config.proxy_mode = _env_bool("PROXY_MODE", config.proxy_mode)
     config.proto_switch_period = _env_int("PROTO_SWITCH_PERIOD", config.proto_switch_period)
     config.adaptive_paths = _env_bool("ADAPTIVE_PATHS", config.adaptive_paths)
