@@ -246,8 +246,8 @@ class EntrySession:
                 self.session_id, path_id, family_id, variant_id
             ):
                 writer.write(frame.encode())
-                await writer.drain()
                 await asyncio.sleep(delay_ms / 1000)
+            await writer.drain()
 
     async def handle_client(
         self,
@@ -331,10 +331,7 @@ class EntrySession:
                         await self.send_chunk(prefix + rewritten + body, path_conns)
                     proxy_target_sent = True
                 else:
-                    if tunnel_mode:
-                        await self.send_chunk(data, path_conns)
-                    else:
-                        await self.send_chunk(data, path_conns)
+                    await self.send_chunk(data, path_conns)
         except asyncio.IncompleteReadError:
             LOGGER.info("客户端已断开 %s", addr)
         finally:
@@ -472,20 +469,22 @@ class EntrySession:
         # 将上行 payload 分片并流式发送
         remaining = memoryview(data)
         max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        flush_bytes = 32768
+        pending_flush: Dict[asyncio.StreamWriter, int] = {}
         while remaining:
             chunk = remaining[:max_chunk]
             remaining = remaining[len(chunk) :]
             seq = self.seq_counter
             self.seq_counter += 1
             fragments: List[tuple[int, bytes]] = []
-            pending = bytes(chunk)
-            while pending:
+            pending_data = bytes(chunk)
+            while pending_data:
                 # 路径调度 + 按路径目标分布选择分片长度
                 path_id = self.scheduler.choose_path()
                 params = self.behavior.params_by_path[path_id]
-                target_len = len(pending) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
-                piece = pending[:target_len]
-                pending = pending[target_len:]
+                target_len = len(pending_data) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
+                piece = pending_data[:target_len]
+                pending_data = pending_data[target_len:]
                 fragments.append((path_id, piece))
                 self.behavior.note_real_bytes(path_id, len(piece))
             total = len(fragments)
@@ -515,12 +514,21 @@ class EntrySession:
                     await asyncio.sleep(jitter_ms / 1000 * random.random())
                 _, writer = path_conns[path_id]
                 writer.write(frame.encode())
-                await writer.drain()
+                pending_flush[writer] = pending_flush.get(writer, 0) + len(frame.payload)
+                if pending_flush[writer] >= flush_bytes:
+                    await writer.drain()
+                    pending_flush[writer] = 0
                 if self.behavior.update_burst(path_id):
                     template = frame
                     for padding in self.behavior.make_padding_frames(template):
                         writer.write(padding.encode())
-                        await writer.drain()
+                        pending_flush[writer] = pending_flush.get(writer, 0) + len(padding.payload)
+                        if pending_flush[writer] >= flush_bytes:
+                            await writer.drain()
+                            pending_flush[writer] = 0
+        for writer, bytes_pending in pending_flush.items():
+            if bytes_pending > 0:
+                await writer.drain()
 
     def _reset_missing_timer(self) -> None:
         candidates = [

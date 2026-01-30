@@ -47,14 +47,9 @@ async def run() -> None:
     run_id = os.environ.get("RUN_ID") or f"{uuid.uuid4().hex[:8]}"
     out_dir = os.environ.get("OUT_DIR") or f"out/{run_id}"
     base_env = os.environ | {"RUN_ID": run_id, "OUT_DIR": out_dir}
-    base_env["ENABLE_TRACE"] = "0"
-    if os.environ.get("START_ALL_ENABLE_TRACE") == "1":
-        base_env["ENABLE_TRACE"] = "1"
-    base_env["CAPTURE_PCAP"] = "0"
-    if os.environ.get("START_ALL_CAPTURE_PCAP") == "1":
-        base_env["CAPTURE_PCAP"] = "1"
+    base_env["ENABLE_TRACE"] = "1" if config.enable_trace else "0"
+    base_env["CAPTURE_PCAP"] = "1" if config.capture_pcap else "0"
     base_env["CONFIG_PATH"] = str(config_path)
-    base_env["CAPTURE_PCAP"] = "1" if config.capture_pcap else base_env["CAPTURE_PCAP"]
     if config.capture_dir:
         base_env["CAPTURE_DIR"] = config.capture_dir
     json_log_path = os.environ.get("START_ALL_JSON_LOG") or f"{out_dir}/start_all_logs.jsonl"
@@ -82,7 +77,7 @@ async def run() -> None:
                 json_log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 json_log_file.flush()
     # 启动目标服务（外部真实服务模式可跳过）
-    if not config.external_server and os.environ.get("EXTERNAL_SERVER") != "1":
+    if not config.external_server:
         server_proc = await asyncio.create_subprocess_exec(
             python,
             "-m",

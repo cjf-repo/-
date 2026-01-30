@@ -420,6 +420,8 @@ class ExitNode:
         # 下行分片并流式发送
         remaining = memoryview(data)
         max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        flush_bytes = 32768
+        pending_flush: Dict[asyncio.StreamWriter, int] = {}
         seq = self._down_seq_counter.get(frame.session_id, 0)
         while remaining:
             chunk = remaining[:max_chunk]
@@ -470,7 +472,10 @@ class ExitNode:
                     await asyncio.sleep(jitter_ms / 1000 * random.random())
                 writer.write(out_frame.encode())
                 try:
-                    await writer.drain()
+                    pending_flush[writer] = pending_flush.get(writer, 0) + len(out_frame.payload)
+                    if pending_flush[writer] >= flush_bytes:
+                        await writer.drain()
+                        pending_flush[writer] = 0
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
                     LOGGER.debug("下行发送失败 path %s: %s", path_id, exc)
                     session_writers.pop(path_id, None)
@@ -480,11 +485,20 @@ class ExitNode:
                     for padding in self.behavior.make_padding_frames(template):
                         writer.write(padding.encode())
                         try:
-                            await writer.drain()
+                            pending_flush[writer] = pending_flush.get(writer, 0) + len(padding.payload)
+                            if pending_flush[writer] >= flush_bytes:
+                                await writer.drain()
+                                pending_flush[writer] = 0
                         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
                             LOGGER.debug("填充发送失败 path %s: %s", path_id, exc)
                             session_writers.pop(path_id, None)
                             break
+        for writer, bytes_pending in pending_flush.items():
+            if bytes_pending > 0:
+                try:
+                    await writer.drain()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    continue
             seq += 1
         self._down_seq_counter[frame.session_id] = seq
 
