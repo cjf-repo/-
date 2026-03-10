@@ -1,10 +1,14 @@
 {
-    "entry_host": "127.0.0.1",
-    "entry_port": 9010,
-    "exit_port": 9210,
-    "middle_ports": [9191, 9192],
-    "server_host": "127.0.0.1",
-    "server_port": 9310,
-    "console_log": false
-  }
-  
+  "entry_host": "127.0.0.1",
+  "entry_port": 9010,
+  "exit_port": 9210,
+  "middle_ports": [
+    9191,
+    9192,
+    9193,
+    9194
+  ],
+  "server_host": "127.0.0.1",
+  "server_port": 9310,
+  "console_log": false
+}

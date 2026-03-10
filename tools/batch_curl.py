@@ -253,6 +253,20 @@ def start_capture(out_dir: Path, *, config_path: str | None, ready_file: Path | 
     return subprocess.Popen(cmd)
 
 
+def read_middle_ports(config_path: str) -> list[int] | None:
+    try:
+        data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    ports = data.get("middle_ports")
+    if not isinstance(ports, list):
+        return None
+    try:
+        return [int(p) for p in ports]
+    except (TypeError, ValueError):
+        return None
+
+
 def url_label(url: str) -> str:
     parsed = urlparse(url if "://" in url else f"http://{url}")
     host = parsed.netloc or parsed.path
@@ -373,6 +387,15 @@ def main() -> None:
                 run_id = uuid.uuid4().hex[:8]
                 run_dir = Path(args.pcap_dir) / run_id
                 ready_file = run_dir / ".capture_ready"
+                if args.print_cmd:
+                    if proxy in proxy_config_map:
+                        ports = read_middle_ports(proxy_config_map[proxy])
+                        print(
+                            f"[pcap] proxy={proxy} config={proxy_config_map[proxy]} middle_ports={ports}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(f"[pcap] proxy={proxy} config=None", file=sys.stderr)
                 capture_proc = start_capture(
                     run_dir,
                     config_path=proxy_config_map.get(proxy),

@@ -25,16 +25,31 @@ class MultiPathScheduler:
         # 初始化路径权重与批量状态
         self.path_ids = path_ids
         self.weights = {path_id: 1.0 for path_id in path_ids}
-        self.batch_size = batch_size
+        self.batch_size = max(1, batch_size)
         self._batch_remaining = 0
         self._current_path = random.choice(path_ids)
         # 路径统计
         self.stats = {path_id: PathStats() for path_id in path_ids}
 
-    def update_weights(self, weights: Dict[int, float]) -> None:
+    def update_weights(self, weights: Dict[int, float], *, drop_ratio: float = 0.3) -> bool:
         # 更新权重并设置下界
+        prev_weight = self.weights.get(self._current_path, 1.0)
         for path_id, weight in weights.items():
             self.weights[path_id] = max(weight, 0.1)
+        current_weight = self.weights.get(self._current_path, 1.0)
+        # 当前批次路径权重发生突降时，立即结束本批次并触发重采样
+        dropped = current_weight < prev_weight * max(0.0, 1.0 - drop_ratio)
+        if dropped:
+            self._batch_remaining = 0
+        return dropped
+
+    def set_batch_size(self, batch_size: int, *, force_resample: bool = False) -> None:
+        # 动态更新批次大小，可选择立即触发重采样
+        self.batch_size = max(1, batch_size)
+        if force_resample:
+            self._batch_remaining = 0
+        elif self._batch_remaining > self.batch_size:
+            self._batch_remaining = self.batch_size
 
     def choose_path(self) -> int:
         # 批量随机：同一批次走同一路径，降低乱序

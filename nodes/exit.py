@@ -5,6 +5,7 @@ import asyncio
 import json
 import random
 import socket
+import statistics
 import time
 import struct
 from typing import Dict, List
@@ -114,6 +115,8 @@ class ExitNode:
         self.variant_by_path: Dict[int, int] = {
             path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
+        self._batch_mode = "balanced"
+        self._rtt_volatility = 0.0
 
     async def connect_server(self, host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         # 连接目标服务
@@ -510,7 +513,14 @@ class ExitNode:
             metrics = self.scheduler.snapshot()
             output = self.strategy.evaluate(metrics, 0, self.window_id, self.config.obfuscation_level)
             # 更新调度与行为参数
-            self.scheduler.update_weights(output.weights)
+            batch_size, batch_mode, rtt_volatility = self._dynamic_batch_plan(
+                metrics,
+                output.obfuscation_level,
+            )
+            dropped = self.scheduler.update_weights(output.weights)
+            self.scheduler.set_batch_size(batch_size, force_resample=dropped)
+            self._batch_mode = batch_mode
+            self._rtt_volatility = rtt_volatility
             self.family_by_path = output.family_by_path
             self.variant_by_path = output.variant_by_path
             for path_id, params in output.behavior_by_path.items():
@@ -542,9 +552,31 @@ class ExitNode:
                     "trigger": output.trigger,
                     "action": output.action,
                     "adaptive_flags": output.adaptive_flags,
+                    "batch_size": self.scheduler.batch_size,
+                    "batch_mode": self._batch_mode,
+                    "rtt_volatility": self._rtt_volatility,
+                    "weight_drop_resample": dropped,
                 }
                 self.run_context.write_window_log(log_entry)
                 LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
+
+    def _dynamic_batch_plan(
+        self,
+        metrics: Dict[int, Dict[str, float]],
+        obfuscation_level: int,
+    ) -> tuple[int, str, float]:
+        # 出口侧使用相同批次规则，保证双向路径调度行为一致
+        rtts = [item["rtt_ms"] for item in metrics.values() if item["rtt_ms"] > 0]
+        rtt_volatility = statistics.pstdev(rtts) if len(rtts) >= 2 else 0.0
+        losses = [item["loss"] for item in metrics.values()]
+        mean_loss = sum(losses) / max(len(losses), 1)
+        balanced = max(2, self.config.batch_size)
+        high_perf = max(balanced, min(8, balanced * 2))
+        if obfuscation_level >= 3:
+            return 1, "high_entropy", rtt_volatility
+        if rtt_volatility >= 30.0 or mean_loss > 0.1:
+            return high_perf, "high_performance", rtt_volatility
+        return balanced, "balanced", rtt_volatility
 
 
 async def main() -> None:

@@ -79,9 +79,9 @@ class Config:
     # 多路径开关
     enable_multipath: bool = True
     # 行为伪装开关（整形/填充/抖动/限速）
-    enable_behavior: bool = True
+    enable_behavior: bool = False
     # 属性伪装开关（协议模板/握手/编码）
-    enable_obfuscation: bool = True
+    enable_obfuscation: bool = False
     # 中继 trace 记录开关
     enable_trace: bool = True
 

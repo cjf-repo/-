@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import random
+import statistics
 import struct
 import time
 from dataclasses import replace
@@ -131,6 +132,8 @@ class EntrySession:
         self.variant_by_path: Dict[int, int] = {
             path_id: 0 for path_id in range(len(self.active_middle_ports))
         }
+        self._batch_mode = "balanced"
+        self._rtt_volatility = 0.0
 
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         # 连接所有中继路径
@@ -160,7 +163,16 @@ class EntrySession:
             effective_level = self._apply_quality_penalty(self.threat_level, mean_rtt, mean_loss)
             output = self.strategy.evaluate(metrics, self.timeout_events, self.window_id, effective_level)
             # 更新调度权重与行为参数
-            self.scheduler.update_weights(output.weights)
+            batch_size, batch_mode, rtt_volatility = self._dynamic_batch_plan(
+                metrics,
+                effective_level,
+                mean_loss,
+                self.timeout_events,
+            )
+            dropped = self.scheduler.update_weights(output.weights)
+            self.scheduler.set_batch_size(batch_size, force_resample=dropped)
+            self._batch_mode = batch_mode
+            self._rtt_volatility = rtt_volatility
             self.family_by_path = output.family_by_path
             self.variant_by_path = output.variant_by_path
             for path_id, params in output.behavior_by_path.items():
@@ -196,6 +208,10 @@ class EntrySession:
                     "trigger": output.trigger,
                     "action": output.action,
                     "adaptive_flags": output.adaptive_flags,
+                    "batch_size": self.scheduler.batch_size,
+                    "batch_mode": self._batch_mode,
+                    "rtt_volatility": self._rtt_volatility,
+                    "weight_drop_resample": dropped,
                 }
                 self.run_context.write_window_log(log_entry)
                 LOGGER.info(json.dumps(log_entry, ensure_ascii=False))
@@ -234,6 +250,24 @@ class EntrySession:
             self.threat_level = min(3, self.threat_level + 1)
         elif timeout_events == 0 and mean_loss < 0.05 and mean_rtt < 120:
             self.threat_level = max(0, self.threat_level - 1)
+
+    def _dynamic_batch_plan(
+        self,
+        metrics: Dict[int, Dict[str, float]],
+        effective_level: int,
+        mean_loss: float,
+        timeout_events: int,
+    ) -> tuple[int, str, float]:
+        # 依据威胁等级与 RTT 波动动态选择批次大小
+        rtts = [item["rtt_ms"] for item in metrics.values() if item["rtt_ms"] > 0]
+        rtt_volatility = statistics.pstdev(rtts) if len(rtts) >= 2 else 0.0
+        balanced = max(2, self.config.batch_size)
+        high_perf = max(balanced, min(8, balanced * 2))
+        if effective_level >= 3 or timeout_events > 0:
+            return 1, "high_entropy", rtt_volatility
+        if rtt_volatility >= 30.0 or mean_loss > 0.1:
+            return high_perf, "high_performance", rtt_volatility
+        return balanced, "balanced", rtt_volatility
 
     async def send_handshake(self, conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
         # 发送握手帧，建立协议上下文

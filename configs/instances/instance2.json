@@ -2,7 +2,12 @@
   "entry_host": "127.0.0.1",
   "entry_port": 9002,
   "exit_port": 9202,
-  "middle_ports": [9111, 9112],
+  "middle_ports": [
+    9111,
+    9112,
+    9113,
+    9114
+  ],
   "server_host": "127.0.0.1",
   "server_port": 9302,
   "console_log": false
