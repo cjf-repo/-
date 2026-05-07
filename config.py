@@ -32,6 +32,14 @@ class Config:
     # 中继节点主机与端口列表
     middle_host: str = "127.0.0.1"
     middle_ports: List[int] = field(default_factory=lambda: [9101, 9102])
+    # 中继模拟时延（毫秒）
+    middle_base_delay_ms: int = 20
+    # 中继模拟抖动（毫秒）
+    middle_jitter_ms: int = 10
+    # 中继模拟丢包率
+    middle_loss_rate: float = 0.0
+    # CONNECT 隧道模式下最小发送 chunk 大小（字节，<=0 表示不放大）
+    tunnel_min_chunk_bytes: int = 0
 
     # 出口节点监听地址/端口
     exit_host: str = "127.0.0.1"
@@ -96,6 +104,12 @@ class Config:
 
     # ACK 超时时间
     ack_timeout_sec: float = 2.0
+    # 上游 HTTP 响应流空闲超时（秒）
+    upstream_idle_timeout_sec: float = 3.0
+    # 代理模式下，单个缺失下行序号允许的超时次数（超过才断开）
+    proxy_missing_seq_tolerance: int = 3
+    # 下行写回客户端的批量 flush 阈值（字节）
+    downlink_drain_bytes: int = 32768
 
     # 抓包开关
     capture_pcap: bool = False
@@ -150,6 +164,10 @@ def load_config_from_file(path: Path) -> dict:
         "entry_port",
         "middle_host",
         "middle_ports",
+        "middle_base_delay_ms",
+        "middle_jitter_ms",
+        "middle_loss_rate",
+        "tunnel_min_chunk_bytes",
         "exit_host",
         "exit_port",
         "server_host",
@@ -160,6 +178,10 @@ def load_config_from_file(path: Path) -> dict:
         "capture_pcap",
         "capture_dir",
         "console_log",
+        "ack_timeout_sec",
+        "upstream_idle_timeout_sec",
+        "proxy_missing_seq_tolerance",
+        "downlink_drain_bytes",
     }
     overrides = {key: data[key] for key in allowed_keys if key in data}
     middle_ports = overrides.get("middle_ports")
@@ -169,6 +191,22 @@ def load_config_from_file(path: Path) -> dict:
     overrides["entry_port"] = int(overrides["entry_port"])
     overrides["exit_port"] = int(overrides["exit_port"])
     overrides["server_port"] = int(overrides["server_port"])
+    if "middle_base_delay_ms" in overrides:
+        overrides["middle_base_delay_ms"] = int(overrides["middle_base_delay_ms"])
+    if "middle_jitter_ms" in overrides:
+        overrides["middle_jitter_ms"] = int(overrides["middle_jitter_ms"])
+    if "middle_loss_rate" in overrides:
+        overrides["middle_loss_rate"] = float(overrides["middle_loss_rate"])
+    if "tunnel_min_chunk_bytes" in overrides:
+        overrides["tunnel_min_chunk_bytes"] = int(overrides["tunnel_min_chunk_bytes"])
+    if "ack_timeout_sec" in overrides:
+        overrides["ack_timeout_sec"] = float(overrides["ack_timeout_sec"])
+    if "upstream_idle_timeout_sec" in overrides:
+        overrides["upstream_idle_timeout_sec"] = float(overrides["upstream_idle_timeout_sec"])
+    if "proxy_missing_seq_tolerance" in overrides:
+        overrides["proxy_missing_seq_tolerance"] = int(overrides["proxy_missing_seq_tolerance"])
+    if "downlink_drain_bytes" in overrides:
+        overrides["downlink_drain_bytes"] = int(overrides["downlink_drain_bytes"])
     if "console_log" in overrides and not isinstance(overrides["console_log"], bool):
         raise SystemExit("console_log 必须是布尔值 true/false。")
     return overrides
@@ -197,12 +235,20 @@ def load_config_from_env() -> Config:
     config.enable_behavior = _env_bool("ENABLE_BEHAVIOR", config.enable_behavior)
     config.enable_obfuscation = _env_bool("ENABLE_OBFUSCATION", config.enable_obfuscation)
     config.enable_trace = _env_bool("ENABLE_TRACE", config.enable_trace)
+    config.middle_base_delay_ms = _env_int("MIDDLE_BASE_DELAY_MS", config.middle_base_delay_ms)
+    config.middle_jitter_ms = _env_int("MIDDLE_JITTER_MS", config.middle_jitter_ms)
+    config.middle_loss_rate = _env_float("MIDDLE_LOSS_RATE", config.middle_loss_rate)
+    config.tunnel_min_chunk_bytes = _env_int("TUNNEL_MIN_CHUNK_BYTES", config.tunnel_min_chunk_bytes)
     config.capture_pcap = _env_bool("CAPTURE_PCAP", config.capture_pcap)
     config.capture_dir = os.environ.get("CAPTURE_DIR") or config.capture_dir
     config.probe_interval_sec = _env_float("PROBE_INTERVAL_SEC", config.probe_interval_sec)
     config.probe_payload_len = _env_int("PROBE_PAYLOAD_LEN", config.probe_payload_len)
     config.threat_mode = _env_str("THREAT_MODE", config.threat_mode)
     config.threat_level = _env_int("THREAT_LEVEL", config.obfuscation_level)
+    config.ack_timeout_sec = _env_float("ACK_TIMEOUT_SEC", config.ack_timeout_sec)
+    config.upstream_idle_timeout_sec = _env_float("UPSTREAM_IDLE_TIMEOUT_SEC", config.upstream_idle_timeout_sec)
+    config.proxy_missing_seq_tolerance = _env_int("PROXY_MISSING_SEQ_TOLERANCE", config.proxy_missing_seq_tolerance)
+    config.downlink_drain_bytes = _env_int("DOWNLINK_DRAIN_BYTES", config.downlink_drain_bytes)
     # 如提供 SEED 则固定随机种子
     seed = os.environ.get("SEED")
     if seed is not None:

@@ -8,7 +8,14 @@
     9103,
     9104
   ],
+  "middle_base_delay_ms": 1,
+  "middle_jitter_ms": 1,
+  "middle_loss_rate": 0.0,
   "server_host": "127.0.0.1",
   "server_port": 9301,
-  "console_log": true
+  "console_log": true,
+  "ack_timeout_sec": 6.0,
+  "upstream_idle_timeout_sec": 8.0,
+  "proxy_missing_seq_tolerance": 5,
+  "downlink_drain_bytes": 65536
 }

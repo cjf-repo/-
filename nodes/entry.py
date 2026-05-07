@@ -121,6 +121,8 @@ class EntrySession:
         self._pending_down: Dict[int, bytes] = {}
         self._pending_down_ts: Dict[int, float] = {}
         self._next_down_wait_ts: float | None = None
+        self._waiting_missing_seq: int | None = None
+        self._missing_timeout_count: int = 0
         self._downlink_state: dict | None = None
         self._probe_task: asyncio.Task | None = None
         self.threat_level = max(0, min(3, config.threat_level))
@@ -311,6 +313,10 @@ class EntrySession:
             self._window_task = asyncio.create_task(self.start_window_loop())
         self._next_down_seq = 0
         self._pending_down = {}
+        self._pending_down_ts = {}
+        self._next_down_wait_ts = None
+        self._waiting_missing_seq = None
+        self._missing_timeout_count = 0
         fragment_buffer = FragmentBuffer()
         downlink_task = asyncio.create_task(
             self.read_from_paths(
@@ -330,7 +336,7 @@ class EntrySession:
             while True:
                 if close_after_response[0]:
                     break
-                data = await reader.read(2048)
+                data = await reader.read(16384)
                 if not data:
                     break
                 bytes_from_client += len(data)
@@ -356,18 +362,20 @@ class EntrySession:
                     prefix_suffix = " TUNNEL" if is_connect else ""
                     prefix = f"TARGET {host}:{port}{prefix_suffix}\n\n".encode("utf-8")
                     if is_connect:
-                        await self.send_chunk(prefix, path_conns)
+                        await self.send_chunk(prefix, path_conns, tunnel_mode=False)
                         writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         await writer.drain()
                         tunnel_mode = True
                         tunnel_mode_flag[0] = True
                     else:
-                        await self.send_chunk(prefix + rewritten + body, path_conns)
+                        await self.send_chunk(prefix + rewritten + body, path_conns, tunnel_mode=False)
                     proxy_target_sent = True
                 else:
-                    await self.send_chunk(data, path_conns)
+                    await self.send_chunk(data, path_conns, tunnel_mode=tunnel_mode)
         except asyncio.IncompleteReadError:
             LOGGER.info("客户端已断开 %s", addr)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+            LOGGER.info("会话转发中断 %s: %s", addr, exc)
         finally:
             downlink_task.cancel()
             if self._probe_task is not None:
@@ -499,10 +507,20 @@ class EntrySession:
         rewritten = "\r\n".join(lines).encode("iso-8859-1")
         return (host, port), rewritten, None, False
 
-    async def send_chunk(self, data: bytes, path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]) -> None:
+    async def send_chunk(
+        self,
+        data: bytes,
+        path_conns: List[tuple[asyncio.StreamReader, asyncio.StreamWriter]],
+        tunnel_mode: bool = False,
+    ) -> None:
         # 将上行 payload 分片并流式发送
         remaining = memoryview(data)
-        max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        base_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        # 默认保持原安全粒度；仅在显式配置时才放大 CONNECT chunk
+        if tunnel_mode and self.config.tunnel_min_chunk_bytes > 0:
+            max_chunk = max(base_chunk, self.config.tunnel_min_chunk_bytes)
+        else:
+            max_chunk = base_chunk
         flush_bytes = 32768
         pending_flush: Dict[asyncio.StreamWriter, int] = {}
         while remaining:
@@ -514,55 +532,86 @@ class EntrySession:
             pending_data = bytes(chunk)
             while pending_data:
                 # 路径调度 + 按路径目标分布选择分片长度
-                path_id = self.scheduler.choose_path()
+                available_paths = [
+                    pid for pid, (_, w) in enumerate(path_conns) if not w.is_closing()
+                ]
+                if not available_paths:
+                    raise ConnectionResetError("所有中继路径均不可用")
+                path_id = self.scheduler.choose_path_from(available_paths)
                 params = self.behavior.params_by_path[path_id]
-                target_len = len(pending_data) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
+                # CONNECT 隧道中避免同一 seq 被拆成多分片，降低重组阻塞风险
+                if tunnel_mode:
+                    target_len = len(pending_data)
+                else:
+                    target_len = len(pending_data) if not params.enable_shaping else self.behavior.sample_target_len(path_id)
                 piece = pending_data[:target_len]
                 pending_data = pending_data[target_len:]
                 fragments.append((path_id, piece))
                 self.behavior.note_real_bytes(path_id, len(piece))
             total = len(fragments)
-            for frag_id, (path_id, payload) in enumerate(fragments):
-                # 为每个分片构建帧并发送
-                family_id = self.family_by_path.get(path_id, 1)
-                variant_id = self.variant_by_path.get(path_id, 0)
-                frame = Frame(
-                    session_id=self.session_id,
-                    seq=seq,
-                    direction=DIR_UP,
-                    path_id=path_id,
-                    window_id=self.window_id,
-                    proto_id=family_id,
-                    flags=FLAG_FRAGMENT,
-                    frag_id=frag_id,
-                    frag_total=total,
-                    payload=payload,
-                )
-                if self.config.enable_obfuscation:
-                    frame = self.proto.apply(frame, family_id, variant_id)
-                    frame = self.proto.encode_payload(frame, family_id, variant_id)
-                self.scheduler.mark_sent(path_id, seq)
-                await self.behavior.pace(path_id, len(payload))
-                jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
-                if self.behavior.params_by_path[path_id].enable_jitter:
-                    await asyncio.sleep(jitter_ms / 1000 * random.random())
-                _, writer = path_conns[path_id]
-                writer.write(frame.encode())
-                pending_flush[writer] = pending_flush.get(writer, 0) + len(frame.payload)
-                if pending_flush[writer] >= flush_bytes:
-                    await writer.drain()
-                    pending_flush[writer] = 0
-                if self.behavior.update_burst(path_id):
-                    template = frame
-                    for padding in self.behavior.make_padding_frames(template):
-                        writer.write(padding.encode())
-                        pending_flush[writer] = pending_flush.get(writer, 0) + len(padding.payload)
+            for frag_id, (preferred_path_id, payload) in enumerate(fragments):
+                # 为每个分片构建帧并发送；失败时自动换路重试
+                sent = False
+                tried_paths: set[int] = set()
+                while not sent:
+                    available_paths = [
+                        pid for pid, (_, w) in enumerate(path_conns) if not w.is_closing() and pid not in tried_paths
+                    ]
+                    if not available_paths:
+                        raise ConnectionResetError("中继路径写入失败且无可用备选路径")
+                    path_id = preferred_path_id if preferred_path_id in available_paths else self.scheduler.choose_path_from(available_paths)
+                    tried_paths.add(path_id)
+                    family_id = self.family_by_path.get(path_id, 1)
+                    variant_id = self.variant_by_path.get(path_id, 0)
+                    frame = Frame(
+                        session_id=self.session_id,
+                        seq=seq,
+                        direction=DIR_UP,
+                        path_id=path_id,
+                        window_id=self.window_id,
+                        proto_id=family_id,
+                        flags=FLAG_FRAGMENT,
+                        frag_id=frag_id,
+                        frag_total=total,
+                        payload=payload,
+                    )
+                    if self.config.enable_obfuscation:
+                        frame = self.proto.apply(frame, family_id, variant_id)
+                        frame = self.proto.encode_payload(frame, family_id, variant_id)
+                    await self.behavior.pace(path_id, len(payload))
+                    jitter_ms = self.behavior.params_by_path[path_id].jitter_ms
+                    if self.behavior.params_by_path[path_id].enable_jitter:
+                        await asyncio.sleep(jitter_ms / 1000 * random.random())
+                    _, writer = path_conns[path_id]
+                    try:
+                        writer.write(frame.encode())
+                        pending_flush[writer] = pending_flush.get(writer, 0) + len(frame.payload)
                         if pending_flush[writer] >= flush_bytes:
                             await writer.drain()
                             pending_flush[writer] = 0
+                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                        pending_flush.pop(writer, None)
+                        continue
+                    self.scheduler.mark_sent(path_id, seq)
+                    sent = True
+                    if self.behavior.update_burst(path_id):
+                        template = frame
+                        for padding in self.behavior.make_padding_frames(template):
+                            try:
+                                writer.write(padding.encode())
+                                pending_flush[writer] = pending_flush.get(writer, 0) + len(padding.payload)
+                                if pending_flush[writer] >= flush_bytes:
+                                    await writer.drain()
+                                    pending_flush[writer] = 0
+                            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                                pending_flush.pop(writer, None)
+                                break
         for writer, bytes_pending in pending_flush.items():
             if bytes_pending > 0:
-                await writer.drain()
+                try:
+                    await writer.drain()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    continue
 
     def _reset_missing_timer(self) -> None:
         candidates = [
@@ -593,15 +642,36 @@ class EntrySession:
             and now - self._next_down_wait_ts > self.config.ack_timeout_sec
         ):
             missing_seq = self._next_down_seq
-            LOGGER.warning("下行 seq %s 超时未到达，跳过", missing_seq)
+            if self._waiting_missing_seq != missing_seq:
+                self._waiting_missing_seq = missing_seq
+                self._missing_timeout_count = 0
+            self._missing_timeout_count += 1
+            LOGGER.warning(
+                "下行 seq %s 超时未到达（第 %s 次）",
+                missing_seq,
+                self._missing_timeout_count,
+            )
             if self.config.proxy_mode:
-                LOGGER.warning("代理模式下关闭客户端连接并清空下行缓存")
+                tolerance = max(1, self.config.proxy_missing_seq_tolerance)
+                if self._missing_timeout_count < tolerance:
+                    # 继续等待缺失序号，避免瞬时乱序导致代理连接被过早关闭
+                    self._next_down_wait_ts = now
+                    return
+                LOGGER.warning(
+                    "代理模式下下行 seq %s 连续超时 %s 次，关闭客户端连接并清空下行缓存",
+                    missing_seq,
+                    self._missing_timeout_count,
+                )
                 self._close_client_once(client_writer, close_after_response)
                 self._pending_down.clear()
                 self._pending_down_ts.clear()
                 self._next_down_wait_ts = None
+                self._waiting_missing_seq = None
+                self._missing_timeout_count = 0
                 return
             self._next_down_seq += 1
+            self._waiting_missing_seq = None
+            self._missing_timeout_count = 0
             self._reset_missing_timer()
 
     async def _deliver_pending_downlink(
@@ -611,11 +681,14 @@ class EntrySession:
         close_after_response: List[bool],
         expected_response_len: List[int | None],
         delivered_response_len: List[int],
+        tunnel_mode: bool = False,
     ) -> None:
+        drain_threshold = max(4096, self.config.downlink_drain_bytes)
+        buffered = 0
         while self._next_down_seq in self._pending_down:
             data = self._pending_down.pop(self._next_down_seq)
             self._pending_down_ts.pop(self._next_down_seq, None)
-            if self.config.proxy_mode and expected_response_len[0] is None:
+            if self.config.proxy_mode and (not tunnel_mode) and expected_response_len[0] is None:
                 marker = data.find(b"\n\n")
                 if data.startswith(b"RESP_LEN ") and marker != -1:
                     header = data[:marker].decode("utf-8", errors="ignore")
@@ -626,7 +699,10 @@ class EntrySession:
                         expected_response_len[0] = None
                     data = data[marker + 2 :]
             client_writer.write(data)
-            await client_writer.drain()
+            buffered += len(data)
+            if buffered >= drain_threshold:
+                await client_writer.drain()
+                buffered = 0
             if self.config.proxy_mode:
                 bytes_to_client[0] += len(data)
                 delivered_response_len[0] += len(data)
@@ -636,7 +712,15 @@ class EntrySession:
                     and not close_after_response[0]
                 ):
                     self._close_client_once(client_writer, close_after_response)
+                    self._next_down_seq += 1
+                    self._waiting_missing_seq = None
+                    self._missing_timeout_count = 0
+                    break
             self._next_down_seq += 1
+            self._waiting_missing_seq = None
+            self._missing_timeout_count = 0
+        if buffered > 0 and not client_writer.is_closing():
+            await client_writer.drain()
         self._reset_missing_timer()
 
     async def read_from_paths(
@@ -719,44 +803,32 @@ class EntrySession:
                 complete, payload = fragment_buffer.add(frame)
                 if not complete:
                     continue
-                if tunnel_mode_flag[0]:
-                    await self.forward_tunnel_downlink(
-                        payload,
-                        client_writer,
-                        bytes_to_client,
-                    )
-                else:
-                    await self.enqueue_downlink(
-                        frame.seq,
-                        payload,
-                        client_writer,
-                        bytes_to_client,
-                        close_after_response,
-                        expected_response_len,
-                        delivered_response_len,
-                    )
+                await self.enqueue_downlink(
+                    frame.seq,
+                    payload,
+                    client_writer,
+                    bytes_to_client,
+                    close_after_response,
+                    expected_response_len,
+                    delivered_response_len,
+                    tunnel_mode=tunnel_mode_flag[0],
+                )
             else:
                 # 完整 payload 直接入队
                 if self.config.enable_obfuscation and not (
                     frame.flags & (FLAG_ACK | FLAG_HANDSHAKE | FLAG_PADDING)
                 ):
                     frame = self.proto.decode_payload(frame)
-                if tunnel_mode_flag[0]:
-                    await self.forward_tunnel_downlink(
-                        frame.payload,
-                        client_writer,
-                        bytes_to_client,
-                    )
-                else:
-                    await self.enqueue_downlink(
-                        frame.seq,
-                        frame.payload,
-                        client_writer,
-                        bytes_to_client,
-                        close_after_response,
-                        expected_response_len,
-                        delivered_response_len,
-                    )
+                await self.enqueue_downlink(
+                    frame.seq,
+                    frame.payload,
+                    client_writer,
+                    bytes_to_client,
+                    close_after_response,
+                    expected_response_len,
+                    delivered_response_len,
+                    tunnel_mode=tunnel_mode_flag[0],
+                )
 
     async def enqueue_downlink(
         self,
@@ -767,6 +839,7 @@ class EntrySession:
         close_after_response: List[bool],
         expected_response_len: List[int | None],
         delivered_response_len: List[int],
+        tunnel_mode: bool = False,
     ) -> None:
         # 按 seq 重排，确保回程数据按顺序交付给 client
         if seq not in self._pending_down_ts:
@@ -781,6 +854,7 @@ class EntrySession:
             close_after_response,
             expected_response_len,
             delivered_response_len,
+            tunnel_mode=tunnel_mode,
         )
 
     async def forward_tunnel_downlink(

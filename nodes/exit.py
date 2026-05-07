@@ -8,6 +8,7 @@ import socket
 import statistics
 import time
 import struct
+import errno
 from typing import Dict, List
 
 from behavior import BehaviorParams, BehaviorShaper
@@ -96,6 +97,8 @@ class ExitNode:
         )
         # 分片缓冲与路径 writer
         self._fragment_buffers: Dict[int, FragmentBuffer] = {}
+        self._pending_uplink: Dict[int, Dict[int, tuple[Frame, bytes]]] = {}
+        self._next_up_seq: Dict[int, int] = {}
         self._path_writers: Dict[int, Dict[int, asyncio.StreamWriter]] = {}
         self.server_reader: asyncio.StreamReader | None = None
         self.server_writer: asyncio.StreamWriter | None = None
@@ -120,13 +123,25 @@ class ExitNode:
 
     async def connect_server(self, host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         # 连接目标服务
-        try:
-            reader, writer = await asyncio.open_connection(host, port)
-        except (OSError, socket.gaierror) as exc:
-            LOGGER.warning("连接目标服务失败 %s:%s: %s", host, port, exc)
-            raise
-        LOGGER.info("已连接到目标服务 %s:%s", host, port)
-        return reader, writer
+        last_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                reader, writer = await asyncio.open_connection(host, port)
+                LOGGER.info("已连接到目标服务 %s:%s", host, port)
+                return reader, writer
+            except (OSError, socket.gaierror) as exc:
+                last_error = exc
+                # 对 DNS 临时失败做更积极的重试，缓解突发解析抖动
+                if attempt < 4:
+                    if isinstance(exc, socket.gaierror) and exc.errno == socket.EAI_AGAIN:
+                        await asyncio.sleep(0.2 * (attempt + 1))
+                    elif isinstance(exc, OSError) and exc.errno in {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ETIMEDOUT}:
+                        await asyncio.sleep(0.12 * (attempt + 1))
+                    else:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                    continue
+        LOGGER.warning("连接目标服务失败 %s:%s: %s", host, port, last_error)
+        raise OSError(str(last_error))
 
     async def handle_middle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -161,11 +176,9 @@ class ExitNode:
                     complete, payload = fragment_buffer.add(frame)
                     if not complete:
                         continue
-                    await self.forward_to_server(frame, payload)
-                    await self.send_ack(frame)
+                    await self.enqueue_uplink(frame, payload)
                 else:
-                    await self.forward_to_server(frame, frame.payload)
-                    await self.send_ack(frame)
+                    await self.enqueue_uplink(frame, frame.payload)
         except asyncio.IncompleteReadError:
             LOGGER.info("中继节点已断开 %s", addr)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
@@ -178,7 +191,25 @@ class ExitNode:
                 if session_writers is not None and not session_writers:
                     self._path_writers.pop(session_id, None)
                     self._fragment_buffers.pop(session_id, None)
+                    self._pending_uplink.pop(session_id, None)
+                    self._next_up_seq.pop(session_id, None)
                     self.close_proxy_session(session_id)
+
+    async def enqueue_uplink(self, frame: Frame, payload: bytes) -> None:
+        # 按 seq 串行上送，避免 TARGET 前缀与隧道数据乱序到达上游
+        pending = self._pending_uplink.setdefault(frame.session_id, {})
+        pending[frame.seq] = (frame, payload)
+        next_seq = self._next_up_seq.get(frame.session_id, 0)
+        while next_seq in pending:
+            current_frame, current_payload = pending[next_seq]
+            forwarded = await self.forward_to_server(current_frame, current_payload)
+            if not forwarded:
+                # 上游未成功接收时保留当前 seq，等待后续帧触发重试，避免“丢帧但 ACK”
+                break
+            pending.pop(next_seq, None)
+            await self.send_ack(current_frame)
+            next_seq += 1
+        self._next_up_seq[frame.session_id] = next_seq
 
     async def send_ack(self, frame: Frame) -> None:
         # 回发 ACK
@@ -205,7 +236,7 @@ class ExitNode:
             LOGGER.debug("ACK 发送失败 path %s: %s", frame.path_id, exc)
             session_writers.pop(frame.path_id, None)
 
-    async def forward_to_server(self, frame: Frame, payload: bytes) -> None:
+    async def forward_to_server(self, frame: Frame, payload: bytes) -> bool:
         session_id = frame.session_id
         # 与上游服务按会话串行交互，避免 readexactly 冲突
         lock = self._server_locks.get(session_id)
@@ -216,16 +247,29 @@ class ExitNode:
             target = self._server_targets.get(session_id, (self.config.server_host, self.config.server_port))
             tunnel_mode = self._server_tunnels.get(session_id, False)
             if session_id not in self._server_conns:
-                target, payload, tunnel_mode = self.extract_target(payload, target)
-                self._server_targets[session_id] = target
-                self._server_tunnels[session_id] = tunnel_mode
+                has_target_prefix = payload.startswith(b"TARGET ")
+                # 代理模式下仅在会话没有已知目标且当前帧也无 TARGET 时丢弃。
+                if self.config.proxy_mode and (not has_target_prefix) and session_id not in self._server_targets:
+                    LOGGER.warning(
+                        "代理会话首帧缺少 TARGET 前缀，丢弃会话 session=%s path=%s len=%s",
+                        session_id,
+                        frame.path_id,
+                        len(payload),
+                    )
+                    self.close_proxy_session(session_id)
+                    return True
+                if has_target_prefix:
+                    target, payload, tunnel_mode = self.extract_target(payload, target)
+                    self._server_targets[session_id] = target
+                    self._server_tunnels[session_id] = tunnel_mode
+                else:
+                    target = self._server_targets.get(session_id, target)
+                    tunnel_mode = self._server_tunnels.get(session_id, tunnel_mode)
                 try:
                     self._server_conns[session_id] = await self.connect_server(*target)
                 except OSError:
-                    self._server_targets.pop(session_id, None)
-                    self._server_tunnels.pop(session_id, None)
                     self._server_conns.pop(session_id, None)
-                    return
+                    return False
             else:
                 payload = self.strip_target_prefix(payload)
             reader, writer = self._server_conns[session_id]
@@ -236,7 +280,7 @@ class ExitNode:
                     self._tunnel_tasks[session_id] = asyncio.create_task(
                         self.relay_tunnel(session_id, reader)
                     )
-                return
+                return True
             try:
                 writer.write(payload)
                 await writer.drain()
@@ -245,9 +289,8 @@ class ExitNode:
                 try:
                     reader, writer = await self.connect_server(*target)
                 except OSError:
-                    self._server_targets.pop(session_id, None)
-                    self._server_tunnels.pop(session_id, None)
-                    return
+                    # 保留已解析目标，等待下一次上行数据继续重连，避免误判“首帧缺少 TARGET”
+                    return False
                 self._server_conns[session_id] = (reader, writer)
                 writer.write(payload)
                 await writer.drain()
@@ -257,7 +300,7 @@ class ExitNode:
                     self._tunnel_tasks[session_id] = asyncio.create_task(
                         self.relay_tunnel(session_id, reader)
                     )
-                return
+                return True
             if self.config.server_mode == "echo":
                 response = await reader.readexactly(len(payload))
             else:
@@ -274,6 +317,7 @@ class ExitNode:
         await self.send_downlink(frame, response)
         if self.config.proxy_mode and self.config.server_mode == "forward" and not tunnel_mode:
             self.close_proxy_session(frame.session_id)
+        return True
 
     def close_proxy_session(self, session_id: int) -> None:
         # 代理模式下结束会话：关闭与上游和中继的连接
@@ -281,6 +325,8 @@ class ExitNode:
         self._server_targets.pop(session_id, None)
         self._server_tunnels.pop(session_id, None)
         self._down_seq_counter.pop(session_id, None)
+        self._pending_uplink.pop(session_id, None)
+        self._next_up_seq.pop(session_id, None)
         self._server_locks.pop(session_id, None)
         self._fragment_buffers.pop(session_id, None)
         session_writers = self._path_writers.pop(session_id, {})
@@ -332,7 +378,7 @@ class ExitNode:
         chunks = bytearray()
         while True:
             try:
-                data = await asyncio.wait_for(reader.read(4096), timeout=3.0)
+                data = await asyncio.wait_for(reader.read(16384), timeout=self.config.upstream_idle_timeout_sec)
             except asyncio.TimeoutError:
                 break
             if not data:
@@ -344,7 +390,7 @@ class ExitNode:
         # CONNECT 隧道：上游数据到下游的流式转发
         try:
             while True:
-                data = await reader.read(4096)
+                data = await reader.read(16384)
                 if not data:
                     break
                 template = self._tunnel_templates.get(session_id)
@@ -362,7 +408,7 @@ class ExitNode:
                         payload=b"",
                     )
                     self._tunnel_templates[session_id] = template
-                await self.send_downlink(template, data)
+                await self.send_downlink(template, data, tunnel_mode=True)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             pass
         finally:
@@ -419,10 +465,15 @@ class ExitNode:
             return header_bytes + body
         return header_bytes + await self.read_response_stream(reader)
 
-    async def send_downlink(self, frame: Frame, data: bytes) -> None:
+    async def send_downlink(self, frame: Frame, data: bytes, tunnel_mode: bool = False) -> None:
         # 下行分片并流式发送
         remaining = memoryview(data)
-        max_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        base_chunk = max(self.config.size_bins) * max(1, self.config.batch_size)
+        # 默认保持原安全粒度；仅在显式配置时才放大 CONNECT chunk
+        if tunnel_mode and self.config.tunnel_min_chunk_bytes > 0:
+            max_chunk = max(base_chunk, self.config.tunnel_min_chunk_bytes)
+        else:
+            max_chunk = base_chunk
         flush_bytes = 32768
         pending_flush: Dict[asyncio.StreamWriter, int] = {}
         seq = self._down_seq_counter.get(frame.session_id, 0)
@@ -439,8 +490,11 @@ class ExitNode:
                     return
                 # 回程仅在可用路径内调度，避免分片丢失
                 path_id = self.scheduler.choose_path_from(available_paths)
-                target_len = self.behavior.sample_target_len(path_id)
                 params = self.behavior.params_by_path[path_id]
+                if tunnel_mode:
+                    target_len = len(pending)
+                else:
+                    target_len = self.behavior.sample_target_len(path_id)
                 if not params.enable_shaping:
                     target_len = len(pending)
                 piece = pending[:target_len]
@@ -496,13 +550,14 @@ class ExitNode:
                             LOGGER.debug("填充发送失败 path %s: %s", path_id, exc)
                             session_writers.pop(path_id, None)
                             break
+            # 每个下行 chunk 使用一个独立 seq，避免重组时覆盖同 seq 数据
+            seq += 1
         for writer, bytes_pending in pending_flush.items():
             if bytes_pending > 0:
                 try:
                     await writer.drain()
                 except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
                     continue
-            seq += 1
         self._down_seq_counter[frame.session_id] = seq
 
     async def start_window_loop(self) -> None:

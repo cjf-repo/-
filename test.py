@@ -12,7 +12,7 @@ defenses = ["无防御", "WTF-PAD", "DFD", "BiMorphing", "TrafficSliver", "Our"]
 # Reordered to match defenses above:
 # [Undefended, WTF-PAD, DFD, BiMorphing, TrafficSliver-NET, SMART]
 data = {
-    "SVM": [50.6, 58.7, 26.9, 39.7, 21.4, 13.7],
+    "SVM": [50.6, 48.7, 26.9, 39.7, 21.4, 13.7],
     "RF": [89.3, 60.3, 27.3, 40.6, 20.9, 19.8],
     "CNN": [85.3, 64.9, 30.8, 45.3, 27.1, 24.6],
     "DF": [90.3, 66.4, 29.3, 51.6, 23.1, 22.6],

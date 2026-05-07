@@ -140,7 +140,7 @@ async def bridge(
     bytes_since_log = 0
     try:
         while True:
-            data = await reader.read(4096)
+            data = await reader.read(16384)
             if not data:
                 break
             if trace is not None:
