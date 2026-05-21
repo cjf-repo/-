@@ -104,32 +104,36 @@ async def run() -> None:
     stream_tasks.append(asyncio.create_task(read_stream(exit_proc.stderr, source="exit", is_err=True)))
     await asyncio.sleep(0.2)
     # 启动中继节点
-    for port in config.middle_ports:
-        path_id = config.middle_ports.index(port)
-        middle_proc = await asyncio.create_subprocess_exec(
-            python,
-            "-m",
-            "nodes.middle",
-            "--listen",
-            str(port),
-            "--exit-port",
-            str(config.exit_port),
-            "--base-delay",
-            str(config.middle_base_delay_ms),
-            "--jitter",
-            str(config.middle_jitter_ms),
-            "--loss",
-            str(config.middle_loss_rate),
-            "--path-id",
-            str(path_id),
-            env=base_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        processes.append(middle_proc)
-        source = f"middle_{path_id}"
-        stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stdout, source=source, is_err=False)))
-        stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stderr, source=source, is_err=True)))
+    for route in config.route_paths():
+        for hop_idx, hop in enumerate(route.hops):
+            next_host = hop.next_host or config.exit_host
+            next_port = hop.next_port or config.exit_port
+            middle_proc = await asyncio.create_subprocess_exec(
+                python,
+                "-m",
+                "nodes.middle",
+                "--listen",
+                str(hop.port),
+                "--exit-host",
+                str(next_host),
+                "--exit-port",
+                str(next_port),
+                "--base-delay",
+                str(hop.base_delay_ms),
+                "--jitter",
+                str(hop.jitter_ms),
+                "--loss",
+                str(hop.loss_rate),
+                "--path-id",
+                str(route.path_id),
+                env=base_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            processes.append(middle_proc)
+            source = f"middle_{route.path_id}_{hop_idx}"
+            stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stdout, source=source, is_err=False)))
+            stream_tasks.append(asyncio.create_task(read_stream(middle_proc.stderr, source=source, is_err=True)))
     await asyncio.sleep(0.2)
     # 启动入口节点
     entry_proc = await asyncio.create_subprocess_exec(
@@ -159,7 +163,7 @@ async def run() -> None:
             "--exit-port",
             str(config.exit_port),
             "--middle-ports",
-            ",".join([str(port) for port in config.middle_ports]),
+            ",".join([str(port) for port in config.all_middle_ports()]),
             env=base_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

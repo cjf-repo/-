@@ -433,7 +433,7 @@ def main() -> None:
 
     ax.set_title(args.title, fontsize=args.font_size + 1)
     ax.set_xlabel("路径数量", fontsize=args.font_size)
-    ax.set_ylabel(r"最大单路径观测覆盖率", fontsize=args.font_size)
+    ax.set_ylabel("最大单路径观测覆盖率", fontsize=args.font_size)
     ax.set_xticks(path_counts)
     ax.set_ylim(0.0, 1.04)
     ax.set_yticks(np.arange(0.0, 1.01, 0.1))

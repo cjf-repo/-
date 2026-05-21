@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 # 配置模块：集中管理默认配置，并支持从环境变量加载实验参数。
 
@@ -15,12 +15,24 @@ class PathConfig:
     host: str
     # 中继节点端口
     port: int
+    # 下一跳地址
+    next_host: str | None = None
+    # 下一跳端口
+    next_port: int | None = None
     # 单路径基础延迟
     base_delay_ms: int = 20
     # 抖动延迟
     jitter_ms: int = 10
     # 丢包率
     loss_rate: float = 0.0
+
+
+@dataclass
+class RouteConfig:
+    # 逻辑路径编号
+    path_id: int
+    # 该逻辑路径上的所有中继跳点
+    hops: List[PathConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -32,6 +44,8 @@ class Config:
     # 中继节点主机与端口列表
     middle_host: str = "127.0.0.1"
     middle_ports: List[int] = field(default_factory=lambda: [9101, 9102])
+    # 多跳路径配置；为空时回退到 middle_ports 单跳模式
+    paths: List[RouteConfig] = field(default_factory=list)
     # 中继模拟时延（毫秒）
     middle_base_delay_ms: int = 20
     # 中继模拟抖动（毫秒）
@@ -118,12 +132,122 @@ class Config:
     # 是否输出节点日志到控制台
     console_log: bool = True
 
-    def paths(self) -> List[PathConfig]:
-        # 根据端口列表生成路径配置
-        configs = []
-        for port in self.middle_ports:
-            configs.append(PathConfig(host=self.middle_host, port=port))
-        return configs
+    def route_paths(self) -> List[RouteConfig]:
+        # 返回逻辑路径列表；兼容旧版 middle_ports 单跳配置
+        if self.paths:
+            return self.paths
+        routes: list[RouteConfig] = []
+        for path_id, port in enumerate(self.middle_ports):
+            routes.append(
+                RouteConfig(
+                    path_id=path_id,
+                    hops=[
+                        PathConfig(
+                            host=self.middle_host,
+                            port=port,
+                            next_host=self.exit_host,
+                            next_port=self.exit_port,
+                            base_delay_ms=self.middle_base_delay_ms,
+                            jitter_ms=self.middle_jitter_ms,
+                            loss_rate=self.middle_loss_rate,
+                        )
+                    ],
+                )
+            )
+        return routes
+
+    def first_hop_ports(self) -> List[int]:
+        # 逻辑路径首跳端口列表，供 entry/exit 侧按路径数建模
+        return [route.hops[0].port for route in self.route_paths() if route.hops]
+
+    def first_hop_endpoints(self) -> List[tuple[str, int]]:
+        # 逻辑路径首跳地址，供入口连接
+        return [(route.hops[0].host, route.hops[0].port) for route in self.route_paths() if route.hops]
+
+    def all_middle_ports(self) -> List[int]:
+        # 所有中继监听端口，供抓包/运维使用
+        ports: list[int] = []
+        for route in self.route_paths():
+            for hop in route.hops:
+                ports.append(hop.port)
+        return ports
+
+
+def _parse_hop(
+    raw_hop: Any,
+    *,
+    default_host: str,
+    default_delay_ms: int,
+    default_jitter_ms: int,
+    default_loss_rate: float,
+) -> PathConfig:
+    if isinstance(raw_hop, int):
+        return PathConfig(
+            host=default_host,
+            port=int(raw_hop),
+            base_delay_ms=default_delay_ms,
+            jitter_ms=default_jitter_ms,
+            loss_rate=default_loss_rate,
+        )
+    if not isinstance(raw_hop, dict):
+        raise SystemExit("paths[*].hops[*] 必须是端口整数或对象。")
+    port = raw_hop.get("listen_port", raw_hop.get("port"))
+    if port is None:
+        raise SystemExit("paths[*].hops[*] 缺少 listen_port/port。")
+    return PathConfig(
+        host=str(raw_hop.get("listen_host") or raw_hop.get("host") or default_host),
+        port=int(port),
+        next_host=(str(raw_hop["next_host"]) if raw_hop.get("next_host") else None),
+        next_port=(int(raw_hop["next_port"]) if raw_hop.get("next_port") is not None else None),
+        base_delay_ms=int(raw_hop.get("base_delay_ms", default_delay_ms)),
+        jitter_ms=int(raw_hop.get("jitter_ms", default_jitter_ms)),
+        loss_rate=float(raw_hop.get("loss_rate", default_loss_rate)),
+    )
+
+
+def _parse_route_paths(
+    raw_paths: Any,
+    *,
+    default_host: str,
+    default_delay_ms: int,
+    default_jitter_ms: int,
+    default_loss_rate: float,
+    exit_host: str,
+    exit_port: int,
+) -> List[RouteConfig]:
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise SystemExit("paths 必须是非空列表。")
+    routes: list[RouteConfig] = []
+    for route_index, raw_route in enumerate(raw_paths):
+        if isinstance(raw_route, list):
+            raw_hops = raw_route
+        elif isinstance(raw_route, dict):
+            raw_hops = raw_route.get("hops")
+        else:
+            raise SystemExit("paths[*] 必须是 hop 列表或包含 hops 的对象。")
+        if not isinstance(raw_hops, list) or not raw_hops:
+            raise SystemExit("paths[*].hops 必须是非空列表。")
+        hops = [
+            _parse_hop(
+                raw_hop,
+                default_host=default_host,
+                default_delay_ms=default_delay_ms,
+                default_jitter_ms=default_jitter_ms,
+                default_loss_rate=default_loss_rate,
+            )
+            for raw_hop in raw_hops
+        ]
+        for hop_index, hop in enumerate(hops):
+            if hop.next_host is None or hop.next_port is None:
+                if hop_index + 1 < len(hops):
+                    next_hop = hops[hop_index + 1]
+                    hop.next_host = next_hop.host
+                    hop.next_port = next_hop.port
+                else:
+                    hop.next_host = exit_host
+                    hop.next_port = exit_port
+        routes.append(RouteConfig(path_id=route_index, hops=hops))
+    return routes
 
 
 def _env_int(name: str, default: int) -> int:
@@ -155,15 +279,18 @@ def load_config_from_file(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise SystemExit("配置文件必须是 JSON 对象。")
-    required = ["entry_host", "entry_port", "exit_port", "middle_ports", "server_host", "server_port"]
+    required = ["entry_host", "entry_port", "exit_port", "server_host", "server_port"]
     missing = [key for key in required if key not in data]
     if missing:
         raise SystemExit(f"配置文件缺少字段: {', '.join(missing)}")
+    if "middle_ports" not in data and "paths" not in data:
+        raise SystemExit("配置文件必须提供 middle_ports 或 paths。")
     allowed_keys = {
         "entry_host",
         "entry_port",
         "middle_host",
         "middle_ports",
+        "paths",
         "middle_base_delay_ms",
         "middle_jitter_ms",
         "middle_loss_rate",
@@ -184,10 +311,6 @@ def load_config_from_file(path: Path) -> dict:
         "downlink_drain_bytes",
     }
     overrides = {key: data[key] for key in allowed_keys if key in data}
-    middle_ports = overrides.get("middle_ports")
-    if not isinstance(middle_ports, list) or not middle_ports:
-        raise SystemExit("middle_ports 必须是非空列表。")
-    overrides["middle_ports"] = [int(port) for port in middle_ports]
     overrides["entry_port"] = int(overrides["entry_port"])
     overrides["exit_port"] = int(overrides["exit_port"])
     overrides["server_port"] = int(overrides["server_port"])
@@ -209,6 +332,28 @@ def load_config_from_file(path: Path) -> dict:
         overrides["downlink_drain_bytes"] = int(overrides["downlink_drain_bytes"])
     if "console_log" in overrides and not isinstance(overrides["console_log"], bool):
         raise SystemExit("console_log 必须是布尔值 true/false。")
+    middle_host = str(overrides.get("middle_host") or data.get("middle_host") or "127.0.0.1")
+    middle_base_delay_ms = int(overrides.get("middle_base_delay_ms", 20))
+    middle_jitter_ms = int(overrides.get("middle_jitter_ms", 10))
+    middle_loss_rate = float(overrides.get("middle_loss_rate", 0.0))
+    if "paths" in overrides:
+        routes = _parse_route_paths(
+            overrides["paths"],
+            default_host=middle_host,
+            default_delay_ms=middle_base_delay_ms,
+            default_jitter_ms=middle_jitter_ms,
+            default_loss_rate=middle_loss_rate,
+            exit_host=str(overrides.get("exit_host") or data.get("exit_host") or "127.0.0.1"),
+            exit_port=int(overrides["exit_port"]),
+        )
+        overrides["paths"] = routes
+        overrides["middle_ports"] = [route.hops[0].port for route in routes]
+    else:
+        middle_ports = overrides.get("middle_ports")
+        if not isinstance(middle_ports, list) or not middle_ports:
+            raise SystemExit("middle_ports 必须是非空列表。")
+        overrides["middle_ports"] = [int(port) for port in middle_ports]
+        overrides["paths"] = []
     return overrides
 
 

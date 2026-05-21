@@ -86,14 +86,15 @@ class EntrySession:
             enable_jitter=enable_behavior,
         )
         # baseline 模式仅使用单路径
+        first_hops = config.first_hop_endpoints()
         if config.mode.startswith("baseline") or not config.enable_multipath:
-            self.active_middle_ports = [config.middle_ports[0]]
+            self.active_middle_endpoints = [first_hops[0]]
         else:
-            self.active_middle_ports = list(config.middle_ports)
+            self.active_middle_endpoints = list(first_hops)
         # 行为整形器
         self.behavior = BehaviorShaper(
             base_params,
-            path_ids=list(range(len(self.active_middle_ports))),
+            path_ids=list(range(len(self.active_middle_endpoints))),
         )
         # 策略引擎
         self.strategy = StrategyEngine(
@@ -111,7 +112,7 @@ class EntrySession:
         )
         # 多路径调度器
         self.scheduler = MultiPathScheduler(
-            path_ids=list(range(len(self.active_middle_ports))),
+            path_ids=list(range(len(self.active_middle_endpoints))),
             batch_size=config.batch_size,
         )
         # 超时事件计数
@@ -129,10 +130,10 @@ class EntrySession:
         self.threat_mode = config.threat_mode.lower()
         # 协议族/变体映射
         self.family_by_path: Dict[int, int] = {
-            path_id: 1 for path_id in range(len(self.active_middle_ports))
+            path_id: 1 for path_id in range(len(self.active_middle_endpoints))
         }
         self.variant_by_path: Dict[int, int] = {
-            path_id: 0 for path_id in range(len(self.active_middle_ports))
+            path_id: 0 for path_id in range(len(self.active_middle_endpoints))
         }
         self._batch_mode = "balanced"
         self._rtt_volatility = 0.0
@@ -140,10 +141,10 @@ class EntrySession:
     async def connect_paths(self) -> List[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
         # 连接所有中继路径
         conns = []
-        for port in self.active_middle_ports:
-            reader, writer = await asyncio.open_connection(self.config.middle_host, port)
+        for host, port in self.active_middle_endpoints:
+            reader, writer = await asyncio.open_connection(host, port)
             conns.append((reader, writer))
-            LOGGER.info("已连接到中继 %s", port)
+            LOGGER.info("已连接到中继 %s:%s", host, port)
         return conns
 
     async def start_window_loop(self) -> None:
@@ -875,7 +876,7 @@ async def main() -> None:
     config = DEFAULT_CONFIG
     if args.middle_ports:
         ports = [int(port.strip()) for port in args.middle_ports.split(",") if port.strip()]
-        config = replace(DEFAULT_CONFIG, middle_ports=ports)
+        config = replace(DEFAULT_CONFIG, middle_ports=ports, paths=[])
     node = EntryNode(config)
     server = await asyncio.start_server(node.handle_client, config.entry_host, args.listen)
     LOGGER.info("入口节点监听 %s:%s", config.entry_host, args.listen)

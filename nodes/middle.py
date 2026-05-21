@@ -226,7 +226,19 @@ async def main() -> None:
         jitter_ms=args.jitter,
         loss_rate=args.loss,
     )
-    path_id = args.path_id if args.path_id >= 0 else DEFAULT_CONFIG.middle_ports.index(args.listen)
+    if args.path_id >= 0:
+        path_id = args.path_id
+    else:
+        path_id = -1
+        for route in DEFAULT_CONFIG.route_paths():
+            for hop in route.hops:
+                if hop.port == args.listen:
+                    path_id = route.path_id
+                    break
+            if path_id >= 0:
+                break
+        if path_id < 0:
+            raise SystemExit(f"未在配置中找到 listen={args.listen} 对应的路径。")
     enable_trace = DEFAULT_CONFIG.enable_trace
     server = await asyncio.start_server(
         lambda r, w: handle_entry(

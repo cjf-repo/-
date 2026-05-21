@@ -258,6 +258,27 @@ def read_middle_ports(config_path: str) -> list[int] | None:
         data = json.loads(Path(config_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    raw_paths = data.get("paths")
+    if isinstance(raw_paths, list) and raw_paths:
+        ports: list[int] = []
+        for raw_route in raw_paths:
+            if isinstance(raw_route, list):
+                raw_hops = raw_route
+            elif isinstance(raw_route, dict):
+                raw_hops = raw_route.get("hops")
+            else:
+                continue
+            if not isinstance(raw_hops, list):
+                continue
+            for raw_hop in raw_hops:
+                if isinstance(raw_hop, int):
+                    ports.append(int(raw_hop))
+                elif isinstance(raw_hop, dict):
+                    port = raw_hop.get("listen_port", raw_hop.get("port"))
+                    if port is not None:
+                        ports.append(int(port))
+        if ports:
+            return ports
     ports = data.get("middle_ports")
     if not isinstance(ports, list):
         return None

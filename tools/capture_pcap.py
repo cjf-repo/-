@@ -80,15 +80,25 @@ async def main() -> None:
     if capture_cmd is None:
         LOGGER.error("未找到 tcpdump/tshark，无法自动抓包")
         return
-    if args.config:
-        os.environ["CONFIG_PATH"] = args.config
+    middle_targets: list[tuple[str, int]] = []
+    config_path = args.config or os.environ.get("CONFIG_PATH")
+    if config_path:
+        os.environ["CONFIG_PATH"] = config_path
         from config import DEFAULT_CONFIG
 
         args.entry_port = DEFAULT_CONFIG.entry_port
         args.exit_port = DEFAULT_CONFIG.exit_port
-        args.middle_ports = ",".join([str(port) for port in DEFAULT_CONFIG.middle_ports])
-
-    middle_ports = [p.strip() for p in args.middle_ports.split(",") if p.strip()]
+        single_hop_only = all(len(route.hops) == 1 for route in DEFAULT_CONFIG.route_paths())
+        for route in DEFAULT_CONFIG.route_paths():
+            for hop_idx, hop in enumerate(route.hops):
+                if single_hop_only:
+                    label = f"middle_{route.path_id}"
+                else:
+                    label = f"middle_p{route.path_id}_h{hop_idx}"
+                middle_targets.append((label, hop.port))
+    else:
+        middle_ports = [p.strip() for p in args.middle_ports.split(",") if p.strip()]
+        middle_targets = [(f"middle_{idx}", int(port)) for idx, port in enumerate(middle_ports)]
     base = Path(args.out_dir)
 
     tasks: list[asyncio.subprocess.Process] = []
@@ -114,10 +124,10 @@ async def main() -> None:
                 proc.terminate()
         return
     tasks.append(exit_proc)
-    for idx, port in enumerate(middle_ports):
+    for label, port in middle_targets:
         proc = await run_capture(
             capture_cmd,
-            base / f"middle_{idx}.pcap",
+            base / f"{label}.pcap",
             f"tcp port {port}",
             check_startup=True,
         )

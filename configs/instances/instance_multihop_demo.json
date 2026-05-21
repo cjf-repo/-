@@ -1,0 +1,57 @@
+{
+  "_comment": "示例配置：两条逻辑路径，每条路径包含两个中间节点，最终都汇聚到同一个出口节点。",
+  "entry_host": "127.0.0.1",
+  "_entry_comment": "入口节点监听地址，浏览器/代理客户端连接这里。",
+  "entry_port": 9041,
+  "_exit_comment": "最终出口节点监听端口，所有路径的最后一跳都会转发到这里。",
+  "exit_port": 9241,
+  "paths": [
+    {
+      "_comment": "路径 0：9401 -> 9405 -> 9241",
+      "hops": [
+        {
+          "_comment": "路径 0 的第一跳中继。",
+          "listen_port": 9401,
+          "base_delay_ms": 1,
+          "jitter_ms": 1,
+          "loss_rate": 0.0
+        },
+        {
+          "_comment": "路径 0 的第二跳中继，下一跳指向最终出口。",
+          "listen_port": 9405,
+          "base_delay_ms": 1,
+          "jitter_ms": 1,
+          "loss_rate": 0.0
+        }
+      ]
+    },
+    {
+      "_comment": "路径 1：9402 -> 9406 -> 9241",
+      "hops": [
+        {
+          "_comment": "路径 1 的第一跳中继。",
+          "listen_port": 9402,
+          "base_delay_ms": 2,
+          "jitter_ms": 1,
+          "loss_rate": 0.0
+        },
+        {
+          "_comment": "路径 1 的第二跳中继，下一跳指向最终出口。",
+          "listen_port": 9406,
+          "base_delay_ms": 2,
+          "jitter_ms": 1,
+          "loss_rate": 0.0
+        }
+      ]
+    }
+  ],
+  "server_host": "127.0.0.1",
+  "_server_comment": "目标服务地址，本地回显/转发测试时使用。",
+  "server_port": 9341,
+  "_log_comment": "控制台日志开关和超时参数，用于实验时降低误判与便于排查。",
+  "console_log": true,
+  "ack_timeout_sec": 6.0,
+  "upstream_idle_timeout_sec": 8.0,
+  "proxy_missing_seq_tolerance": 5,
+  "downlink_drain_bytes": 65536
+}

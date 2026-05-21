@@ -23,6 +23,24 @@ for path in sorted(root.glob("instance*.json")):
             ports.add(int(value))
     for port in data.get("middle_ports", []):
         ports.add(int(port))
+    raw_paths = data.get("paths")
+    if isinstance(raw_paths, list):
+        for raw_route in raw_paths:
+            if isinstance(raw_route, list):
+                raw_hops = raw_route
+            elif isinstance(raw_route, dict):
+                raw_hops = raw_route.get("hops")
+            else:
+                continue
+            if not isinstance(raw_hops, list):
+                continue
+            for raw_hop in raw_hops:
+                if isinstance(raw_hop, int):
+                    ports.add(int(raw_hop))
+                elif isinstance(raw_hop, dict):
+                    port = raw_hop.get("listen_port", raw_hop.get("port"))
+                    if port is not None:
+                        ports.add(int(port))
 print(" ".join(str(p) for p in sorted(ports)))
 PY
 )"

@@ -67,18 +67,19 @@ class ExitNode:
             enable_jitter=enable_behavior,
         )
         # baseline 模式仅使用单路径
+        first_hops = config.first_hop_ports()
         if config.mode.startswith("baseline") or not config.enable_multipath:
-            self.active_middle_ports = [config.middle_ports[0]]
+            self.active_path_ports = [first_hops[0]]
         else:
-            self.active_middle_ports = list(config.middle_ports)
+            self.active_path_ports = list(first_hops)
         # 行为整形器
         self.behavior = BehaviorShaper(
             base_params,
-            path_ids=list(range(len(self.active_middle_ports))),
+            path_ids=list(range(len(self.active_path_ports))),
         )
         # 多路径调度器
         self.scheduler = MultiPathScheduler(
-            path_ids=list(range(len(self.active_middle_ports))),
+            path_ids=list(range(len(self.active_path_ports))),
             batch_size=config.batch_size,
         )
         # 策略引擎
@@ -113,10 +114,10 @@ class ExitNode:
         self.window_id = 0
         # 协议族/变体映射
         self.family_by_path: Dict[int, int] = {
-            path_id: 1 for path_id in range(len(self.active_middle_ports))
+            path_id: 1 for path_id in range(len(self.active_path_ports))
         }
         self.variant_by_path: Dict[int, int] = {
-            path_id: 0 for path_id in range(len(self.active_middle_ports))
+            path_id: 0 for path_id in range(len(self.active_path_ports))
         }
         self._batch_mode = "balanced"
         self._rtt_volatility = 0.0
